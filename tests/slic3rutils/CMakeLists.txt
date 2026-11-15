@@ -28,6 +28,9 @@ add_executable(${_TEST_NAME}_tests
     test_scene_raycaster.cpp
     test_scene_benchmark.cpp
     test_lazy.cpp
+    # The MCP server pieces that need neither a socket nor an event loop to exercise.
+    test_main_thread_dispatcher.cpp
+    test_mcp_protocol.cpp
     test_prebuild_queue.cpp
     test_staged_build.cpp
     test_network_versions.cpp
