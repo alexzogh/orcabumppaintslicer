@@ -3,13 +3,19 @@
 ## Purpose and scope
 
 Automatic splitting cuts an object into pieces for a reason the user states, instead of asking them to place each
-plane by hand in the Cut tool. The reason in place today is *Split to Fit the Plate*: the object is larger than the
-printer, and the pieces have to be small enough to print. The same machinery is meant to carry further reasons —
-splitting a painted model so each piece prints in one filament, splitting to reduce overhangs — because the part
-that differs between them is only the choice of planes.
+plane by hand in the Cut tool. There are two reasons in place today:
 
-It is reached from *Modify → Split to Fit the Plate* in the object context menu. It does nothing to an object that
-already fits, and it is absent from the menu for SLA and for objects that came out of the Cut tool.
+- *Split to Fit the Plate* — the object is larger than the printer, and the pieces have to be small enough to
+  print.
+- *Split by Painted Colour* — the object is painted for several filaments, and each piece should print in one of
+  them and be assembled afterwards.
+
+A third, splitting to reduce overhangs, is meant to join them, because the part that differs between reasons is
+only the choice of planes.
+
+Both are reached from the *Modify* submenu of the object context menu. Neither does anything to an object that has
+no reason to be split, and both are absent for SLA and for objects that came out of the Cut tool; the colour one
+is absent unless the object carries multi-material paint.
 
 The geometry lives in `src/libslic3r/AutoSplit.{hpp,cpp}` and the menu and plater wiring in
 `src/slic3r/GUI/GUI_Factories.cpp` and `src/slic3r/GUI/Plater.cpp`.
@@ -22,7 +28,11 @@ The geometry lives in `src/libslic3r/AutoSplit.{hpp,cpp}` and the menu and plate
 the connectors to seat on it, each side pointing either at the node that splits it further or at nothing, meaning
 that side is a finished piece. Planning touches no `Model`, no instance and no GUI, so a strategy can be tested on
 a bare mesh — which is what `tests/libslic3r/test_auto_split.cpp` does. A strategy is a function that produces a
-`Plan`; `plan_fit_build_plate()` is the first.
+`Plan`; `plan_fit_build_plate()` and `plan_by_painted_color()` are the two there are.
+
+A `Plan` also names its leaves. Each side of a node points either at the node that splits it further or at an
+entry in `Plan::pieces`, which is where a strategy records what it knows about a finished piece — today, the
+filament it should print in. `execute()` returns the pieces in that order, so a caller can line the two up.
 
 **Execution** is shared. `execute()` walks the tree, drives the existing `Cut` class once per node, and appends the
 leaves to a `Model` the caller owns. Nothing about it is specific to why the planes were chosen, so a new strategy
@@ -73,6 +83,44 @@ The usable volume comes from `usable_size()`, the bed's bounding volume less a c
 the pieces still arrange with a gap between them. On a round bed the bounding box is mostly unreachable, so the
 inscribed square is used instead.
 
+## Choosing planes to separate colours
+
+Multi-material paint is a property of the *surface*: `mmu_segmentation_facets` says which filament each facet
+prints in and says nothing about the material behind it. A piece is a volume. Something has to decide which
+filament the inside belongs to, and the rule is:
+
+> A plane decides the volume. Each piece takes all the material on its side of the separating planes, and its
+> filament is the one most of the paint it carries asks for. The planes are chosen to leave as little painted
+> area as possible on the wrong piece.
+
+The alternative — giving each interior point the colour of the nearest painted facet and splitting along the
+resulting boundary — fits the paint exactly and produces parts nobody can use. Those boundaries are curved and
+re-entrant, so the parts interlock and cannot be pulled apart in any direction, cannot be joined by the cut
+connectors that already exist, and are usually worse to print than the model was whole. Separating the filaments
+is only worth anything if the pieces go back together, so the rule trades exactness at a colour boundary for parts
+that assemble.
+
+`painted_surface()` turns the paint into a list of facets with a centre, an area and a filament, in cut space.
+Area matters because the triangle selector subdivides a partly painted facet, so the pieces are nothing like the
+same size; counting facets would weigh a sliver as heavily as a wall. An unpainted facet takes its volume's own
+filament, which is what the slicer would print it in.
+
+For a piece, the planner tries each of a set of directions — by default the three axes, the six face diagonals and
+the four body diagonals of a cube, since colour boundaries rarely line up with the axes. Along one direction it
+bins the facets by the projection of their centres and sweeps the split point through the bins, so one pass of the
+running totals gives the best position along that whole direction rather than a local search. The cost of a split
+is the painted area that would end up on the piece of the wrong colour, summed over the colours present.
+
+The recursion stops on a piece when only one colour covers more than `ignore_colour_fraction` of it — a few stray
+facets are not a reason to cut a model in two — or when the best plane still strands more than
+`hopeless_fraction` of the painted area on the wrong side. The second case is the honest answer for paint no plane
+can follow, such as a logo in the middle of a flat face: the piece is left whole and the caller says so, rather
+than a cut being made somewhere that does not mean anything.
+
+A piece that was given a filament of its own has its paint removed, because it now prints in one filament and
+leaving the paint on would reinstate the very colours the split was asked to separate. `ExecuteParams` can turn
+that off.
+
 ## Connectors
 
 The planner puts connectors on each plane so the pieces locate and glue together. It slices the model at the plane,
@@ -86,6 +134,11 @@ one.
 gizmo does, so the existing connector types, styles and shapes all apply and no second joint system exists.
 `make_cut_connector_mesh()` in `CutUtils` builds the unit shape and is shared with the gizmo.
 
+A piece is the intersection of the half-spaces of the cuts that made it, and the cross-section is clipped to
+those before it is eroded. A half-space of cut space meets the plane in a half-plane of the plane's own frame, so
+the clip is a sequence of 2D half-plane intersections. That works for a plate split, whose half-spaces happen to
+be axis-aligned, and for a colour split, whose are not.
+
 The cross-section is taken from the original solid, which does not know about holes an earlier cut's connectors
 left. A plane passing through an earlier connector can therefore seat one where material has been removed.
 
@@ -95,6 +148,12 @@ The pieces are not a cut set: `cut_id` is cleared on them, so the Cut gizmo does
 cut whose connectors it keeps in sync. That machinery is built around a two-piece cut and does not describe a tree
 of a dozen.
 
-Planes are axis-aligned in cut space. A model that would fit in fewer pieces cut on a diagonal, or rotated first,
-is cut into more than the minimum. Auto-orientation (`src/libslic3r/Orient.cpp`) is the existing tool for the
-rotation half of that and is left to the user to run first.
+The plate planner cuts only on the axes. A model that would fit in fewer pieces cut on a diagonal, or rotated
+first, is cut into more than the minimum. Auto-orientation (`src/libslic3r/Orient.cpp`) is the existing tool for
+the rotation half of that and is left to the user to run first. The colour planner is not restricted this way and
+tries thirteen directions.
+
+A colour split is an approximation and does not pretend otherwise. Paint whose boundary is not close to planar is
+left alone rather than cut badly, and even a split the planner is happy with can leave some painted area on the
+wrong piece. Both planners also measure a region by the centres of its facets, so a facet straddling a plane is
+counted wholly on one side.
