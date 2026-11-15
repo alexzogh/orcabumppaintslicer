@@ -819,6 +819,9 @@ public:
     bool can_replace_with_stl() const;
     bool can_replace_all_with_stl() const;
     bool can_mirror() const;
+    // Cut the selected object into pieces that each fit on the build plate.
+    void auto_split_to_fit_plate();
+    bool can_auto_split_to_fit_plate() const;
     bool can_split(bool to_objects) const;
 #if ENABLE_ENHANCED_PRINT_VOLUME_FIT
     bool can_scale_to_print_volume() const;

@@ -1420,6 +1420,13 @@ wxMenu* MenuFactory::append_menu_item_modify(wxMenu* menu, bool multi_selection,
             []() { return plater()->can_split(false); }, m_parent);
     }
 
+    if(sub_menu->GetMenuItemCount() > 0)
+        sub_menu->AppendSeparator();
+    append_menu_item(sub_menu, wxID_ANY, _L("Split to Fit the Plate"),
+        _L("Cut the selected object into pieces that each fit on the build plate, joined by connectors"),
+        [](wxCommandEvent&) { plater()->auto_split_to_fit_plate(); }, "", menu,
+        []() { return plater()->can_auto_split_to_fit_plate(); }, m_parent);
+
     if(mesh_boolean){
         if(sub_menu->GetMenuItemCount() > 0)
             sub_menu->AppendSeparator();

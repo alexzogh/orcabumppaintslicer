@@ -30,6 +30,7 @@
 #include <initializer_list>
 #include <cstdint>
 #include <cstdlib>
+#include "libslic3r/AutoSplit.hpp"
 #include "libslic3r/CommonDefs.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include <cstdio>
@@ -7730,6 +7731,8 @@ struct Plater::priv
     bool can_delete_plate() const;
     bool can_increase_instances() const;
     bool can_decrease_instances() const;
+    void auto_split_to_fit_plate();
+    bool can_auto_split_to_fit_plate() const;
     bool can_split_to_objects() const;
     bool can_split_to_volumes() const;
     bool can_arrange() const;
@@ -11341,6 +11344,100 @@ void Plater::priv::split_object(int obj_idx, bool auto_drop /* = true */)
 void Plater::priv::split_volume()
 {
     wxGetApp().obj_list()->split();
+}
+
+// Leave this much room on each side of the plate so the pieces still arrange with a gap
+// between them rather than edge to edge.
+static constexpr double AUTO_SPLIT_PLATE_CLEARANCE = 5.;
+
+// The reason an automatic split could not be made, in words. libslic3r reports a code
+// because it cannot translate; the wording belongs here.
+static wxString auto_split_error_text(AutoSplit::Error error)
+{
+    switch (error) {
+    case AutoSplit::Error::EmptyBuildVolume:
+        return _L("The printer has no usable build volume.");
+    case AutoSplit::Error::PiecesTooThin:
+        return _L("Fitting this object on the plate would need pieces too thin to print.");
+    case AutoSplit::Error::TooManyPieces:
+        return _L("Fitting this object on the plate would need too many pieces.");
+    case AutoSplit::Error::NoSuchInstance:
+    case AutoSplit::Error::CutFailed:
+    case AutoSplit::Error::MalformedPlan:
+    case AutoSplit::Error::None:
+        break;
+    }
+    return _L("The selected object could not be split.");
+}
+
+void Plater::priv::auto_split_to_fit_plate()
+{
+    const int obj_idx = get_selected_object_idx();
+    if (obj_idx < 0 || obj_idx >= int(model.objects.size()))
+        return;
+
+    ModelObject *object       = model.objects[obj_idx];
+    int          instance_idx = get_selection().get_instance_idx();
+    if (instance_idx < 0 || instance_idx >= int(object->instances.size()))
+        instance_idx = 0;
+
+    AutoSplit::FitPlateParams params;
+    params.usable_size = AutoSplit::usable_size(q->build_volume(), AUTO_SPLIT_PLATE_CLEARANCE);
+
+    wxBusyCursor wait;
+
+    AutoSplit::Error      error = AutoSplit::Error::None;
+    const AutoSplit::Plan plan =
+        AutoSplit::plan_fit_build_plate(AutoSplit::cut_space_mesh(*object, instance_idx), params, &error);
+    if (error != AutoSplit::Error::None) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                into_u8(auto_split_error_text(error)));
+        return;
+    }
+    if (plan.empty()) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::RegularNotificationLevel,
+                                                _u8L("This object already fits on the build plate."));
+        return;
+    }
+
+    AutoSplit::ExecuteParams execute_params;
+    execute_params.connectors = params.connectors;
+
+    Model pieces;
+    if (!AutoSplit::execute(plan, *object, instance_idx, execute_params, pieces, &error)) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                into_u8(auto_split_error_text(error)));
+        return;
+    }
+
+    {
+        Plater::TakeSnapshot snapshot(q, _u8L("Split to Fit the Plate"));
+
+        remove(obj_idx);
+        // Load the pieces in one go, otherwise the plate is rearranged after each one.
+        const std::vector<size_t> idxs = load_model_objects(pieces.objects, false, true);
+        q->get_view3D_canvas3D()->update_instance_printable_state_for_objects(idxs);
+
+        get_selection().clear();
+        for (const size_t idx : idxs)
+            get_selection().add_object(unsigned(idx), false);
+    }
+
+    // The pieces come out stacked where the object stood, so lay them out on the plate.
+    q->arrange();
+}
+
+bool Plater::priv::can_auto_split_to_fit_plate() const
+{
+    const int obj_idx = get_selected_object_idx();
+    if (obj_idx < 0 || obj_idx >= int(model.objects.size()))
+        return false;
+    if (sidebar->obj_list()->has_selected_cut_object())
+        return false;
+    return printer_technology != ptSLA && !model.objects[obj_idx]->volumes.empty();
 }
 
 // Boxes within bed that clear every rectangular exclusion zone: the rectangles spanned by bed and
@@ -22839,6 +22936,7 @@ void Plater::drop_selection()               { p->drop_selection(); }
 void Plater::mirror(Axis axis)              { p->mirror(axis); }
 void Plater::split_object(bool auto_drop)   { p->split_object(auto_drop); }
 void Plater::split_volume()                 { p->split_volume(); }
+void Plater::auto_split_to_fit_plate()      { p->auto_split_to_fit_plate(); }
 void Plater::optimize_rotation()
 {
     auto &w = get_ui_job_worker();
@@ -24429,6 +24527,7 @@ bool Plater::can_simplify() const { return p->can_simplify(); }
 bool Plater::can_smooth_mesh() const { return p->can_smooth_mesh(); }
 bool Plater::can_split_to_objects() const { return p->can_split_to_objects(); }
 bool Plater::can_split_to_volumes() const { return p->can_split_to_volumes(); }
+bool Plater::can_auto_split_to_fit_plate() const { return p->can_auto_split_to_fit_plate(); }
 bool Plater::can_arrange() const { return p->can_arrange(); }
 bool Plater::can_layers_editing() const { return p->can_layers_editing(); }
 bool Plater::can_paste_from_clipboard() const

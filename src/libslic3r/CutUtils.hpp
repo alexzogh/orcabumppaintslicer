@@ -20,6 +20,13 @@ using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
 ENABLE_ENUM_BITMASK_OPERATORS(ModelObjectCutAttribute);
 
 
+// The negative volume a cut connector is carved from, as a unit shape: radius 1, height 1,
+// centred on the origin. Scaled and placed by whoever applies the connector. The snap
+// proportions are only read for CutConnectorType::Snap.
+indexed_triangle_set make_cut_connector_mesh(CutConnectorAttributes attributes,
+                                             float                  snap_space_proportion = 0.3f,
+                                             float                  snap_bulge_proportion = 0.15f);
+
 class Cut {
 
     Model                       m_model;
