@@ -5,9 +5,11 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
+#include <boost/filesystem/file_status.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/system/error_code.hpp>
@@ -120,9 +122,41 @@ ServerInfo build_server_info()
     return info;
 }
 
-// Where a client finds the port and token. data_dir() is already per-user, which is the bulk of the
-// protection; tightening the file's own ACL is still owed before this is anything but a spike.
+// Where a client finds the port and token. data_dir() is per-user, which is the bulk of the
+// protection; write_handshake() narrows the file itself to the owner on top of that.
 boost::filesystem::path handshake_path() { return boost::filesystem::path(data_dir()) / "mcp.json"; }
+
+// Write the handshake file so that only this user can read it.
+//
+// The file carries the bearer token, so it is created empty and narrowed before anything is written
+// into it: setting the permissions afterwards would leave a window in which the token sits in a
+// world-readable file. An existing file is removed rather than truncated, since truncating keeps
+// whatever permissions it already had.
+//
+// owner_read | owner_write is POSIX. On Windows boost maps this onto the read-only attribute rather
+// than a real ACL, so there the per-user data_dir stays the whole of the protection.
+bool write_handshake(const boost::filesystem::path &path, const std::string &contents)
+{
+    boost::system::error_code ec;
+    boost::filesystem::remove(path, ec);
+
+    {
+        std::ofstream create(path.string(), std::ios::binary | std::ios::trunc);
+        if (!create)
+            return false;
+    }
+
+    boost::filesystem::permissions(path, boost::filesystem::owner_read | boost::filesystem::owner_write, ec);
+    if (ec)
+        BOOST_LOG_TRIVIAL(warning) << "MCP service could not narrow " << path.string() << ": " << ec.message();
+
+    std::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
+    if (!out)
+        return false;
+    out << contents;
+    out.flush();
+    return bool(out);
+}
 
 } // namespace
 
@@ -158,9 +192,11 @@ void McpService::start()
 
     const boost::filesystem::path path = handshake_path();
     try {
-        std::ofstream out(path.string(), std::ios::binary | std::ios::trunc);
-        out << json{{"port", port}, {"token", listener->token()}, {"url", "http://127.0.0.1:" + std::to_string(port) + "/mcp"}}
-                   .dump(2);
+        const std::string contents =
+            json{{"port", port}, {"token", listener->token()}, {"url", "http://127.0.0.1:" + std::to_string(port) + "/mcp"}}
+                .dump(2);
+        if (!write_handshake(path, contents))
+            throw std::runtime_error("could not write the handshake file");
     } catch (const std::exception &e) {
         BOOST_LOG_TRIVIAL(error) << "MCP service could not write " << path.string() << ": " << e.what();
         listener->stop();
