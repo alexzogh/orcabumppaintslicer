@@ -522,6 +522,8 @@ set(lisbslic3r_sources
     TextConfiguration.hpp
     TextureDisplacement.cpp
     TextureDisplacement.hpp
+    TextureOutlineWrap.cpp
+    TextureOutlineWrap.hpp
     TextureBake/TextureBakeIndex.cpp
     TextureBake/TextureBakeIndex.hpp
     TextureBake/TextureBakeSubdivide.cpp

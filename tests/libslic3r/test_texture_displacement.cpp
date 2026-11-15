@@ -39,6 +39,7 @@
 #include "libslic3r/AABBMesh.hpp"
 #include "libslic3r/AABBTreeIndirect.hpp"
 #include "libslic3r/TextureDisplacement.hpp"
+#include "libslic3r/TextureOutlineWrap.hpp"
 #include "libslic3r/TextureBake/TextureBakeDecimate.hpp"
 #include "libslic3r/TextureBake/TextureBakeFlip.hpp"
 #include "libslic3r/TextureBake/TextureBakeMesh.hpp"
@@ -3535,4 +3536,237 @@ TEST_CASE("an unpainted part of the source carries no paint onto the rebuilt mes
         else if (x > 0.6f * size)
             CHECK(state[t] == uint8_t(EnforcerBlockerType::NONE));
     }
+}
+
+// ---- Outline wrap (TextureProjectionMethod::OutlineWrap) ----
+
+// A closed prism from a counterclockwise 2D outline and a triangulation of it, extruded along Z.
+static indexed_triangle_set extrude_prism(const std::vector<Vec2f>              &outline,
+                                          const std::vector<std::array<int, 3>> &cap, float z0, float z1)
+{
+    const int            n = int(outline.size());
+    indexed_triangle_set its;
+    its.vertices.reserve(size_t(2 * n));
+    for (const Vec2f &p : outline)
+        its.vertices.emplace_back(p.x(), p.y(), z0);
+    for (const Vec2f &p : outline)
+        its.vertices.emplace_back(p.x(), p.y(), z1);
+    for (const std::array<int, 3> &t : cap) {
+        its.indices.emplace_back(t[2], t[1], t[0]);             // bottom cap, facing -Z
+        its.indices.emplace_back(t[0] + n, t[1] + n, t[2] + n); // top cap, facing +Z
+    }
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        its.indices.emplace_back(i, j, j + n);
+        its.indices.emplace_back(i, j + n, i + n);
+    }
+    return its;
+}
+
+// A 10 x 10 mm square cross-section, which does enclose the centre of its own bounding box.
+static indexed_triangle_set make_square_prism(float z0, float z1)
+{
+    return extrude_prism({ { 0.f, 0.f }, { 10.f, 0.f }, { 10.f, 10.f }, { 0.f, 10.f } },
+                         { { 0, 1, 2 }, { 0, 2, 3 } }, z0, z1);
+}
+
+// A C-shaped cross-section over the same 10 x 10 mm bounding box, so its centre (5, 5) sits in the
+// opening: a ray from there crosses the outline three times, or not at all.
+static indexed_triangle_set make_c_prism(float z0, float z1)
+{
+    return extrude_prism({ { 0.f, 0.f }, { 10.f, 0.f }, { 10.f, 2.f }, { 2.f, 2.f },
+                           { 2.f, 8.f }, { 10.f, 8.f }, { 10.f, 10.f }, { 0.f, 10.f } },
+                         { { 0, 1, 2 }, { 0, 2, 3 }, { 0, 3, 4 }, { 0, 4, 7 }, { 4, 5, 6 }, { 4, 6, 7 } },
+                         z0, z1);
+}
+
+TEST_CASE("the outline wrap measures distance along a box's own perimeter", "[TextureDisplacement]")
+{
+    // A 20 mm cube from the origin: the wrap axis is Z through (10, 10), the seam is on the -Y side,
+    // and one loop of the outline is 80 mm. The share of a point is how far round that 80 mm it sits,
+    // which is what gives a pattern the same cell size on a flat face as across a corner - the whole
+    // reason this mapping exists next to Cylindrical, where a corner covers far more angle per mm.
+    const indexed_triangle_set cube = its_make_cube(20., 20., 20.);
+    const OutlineWrap          wrap = build_outline_wrap(cube);
+    REQUIRE(wrap.usable());
+    CHECK_THAT(wrap.mean_length, WithinAbs(80.f, 0.01f));
+
+    // Counterclockwise from the seam at (10, 0): 10 mm to the +X corner, then 20 mm along each side.
+    const auto point = GENERATE(table<Vec3f, float>({
+        { Vec3f(12.f, 0.f, 10.f), 2.f },
+        { Vec3f(20.f, 0.f, 10.f), 10.f },
+        { Vec3f(20.f, 20.f, 10.f), 30.f },
+        { Vec3f(0.f, 20.f, 10.f), 50.f },
+        { Vec3f(0.f, 0.f, 10.f), 70.f },
+        { Vec3f(8.f, 0.f, 10.f), 78.f },
+    }));
+    float share = 0.f, rise = 0.f;
+    REQUIRE(outline_wrap_place(wrap, std::get<0>(point), share, rise));
+    CHECK_THAT(share, WithinAbs(std::get<1>(point) / 80.f, 1e-3f));
+    // The rise is the height climbed over the outline's length, so one repeat of a texture ends up as
+    // tall as it is wide: half way up a 20 mm cube is 10 / 80 of a loop.
+    CHECK_THAT(rise, WithinAbs(10.f / 80.f, 1e-3f));
+}
+
+TEST_CASE("the outline wrap fits a whole number of texture repeats to the perimeter", "[TextureDisplacement]")
+{
+    const indexed_triangle_set cube = its_make_cube(20., 20., 20.);
+    TextureDisplacementLayer   layer;
+    layer.projection_method = TextureProjectionMethod::OutlineWrap;
+    layer.tiling_scale      = 7.f; // 80 / 7 is 11.4 repeats, so 11 of them have to be made to fit
+
+    // compute_outline_wrap_uvs() maps the patch's vertices, so the patch is just the two points being
+    // asked about: the +X corner, 10 mm round the outline, and the +Y corner, 30 mm round it.
+    indexed_triangle_set patch;
+    patch.vertices           = { Vec3f(20.f, 0.f, 10.f), Vec3f(20.f, 20.f, 10.f) };
+    const std::vector<Vec2f> uv = compute_outline_wrap_uvs(cube, patch, layer);
+    REQUIRE(uv.size() == 2);
+
+    // u is in millimetres and is divided by the tile size when the texture is sampled, so the number
+    // of repeats in a full loop is the loop's length over the tile size - and that is what has to be
+    // whole for the pattern to close on itself at the seam rather than meeting a part-repeat there.
+    const float loop = (uv[1].x() - uv[0].x()) / ((30.f - 10.f) / 80.f);
+    CHECK_THAT(loop / layer.tiling_scale, WithinAbs(11.f, 1e-2f));
+    // 11 repeats of 7 mm over an 80 mm outline: every cell is stretched by the same 4%, instead of
+    // all of them being exact and the last one being cut short.
+    CHECK_THAT(loop, WithinAbs(77.f, 0.05f));
+}
+
+TEST_CASE("a cross-section that does not enclose the wrap axis has no outline to follow", "[TextureDisplacement]")
+{
+    // Square below 10 mm, C-shaped above it, over one bounding box. The C's opening faces the axis,
+    // so that band of the part has no outline the axis can see all of and the caller falls back to
+    // Cylindrical there - while the square band below it still wraps.
+    indexed_triangle_set part = make_square_prism(0.f, 10.f);
+    its_merge(part, make_c_prism(10.f, 20.f));
+    const OutlineWrap wrap = build_outline_wrap(part);
+    REQUIRE(wrap.usable());
+
+    float share = 0.f, rise = 0.f;
+    CHECK(outline_wrap_place(wrap, Vec3f(10.f, 5.f, 5.f), share, rise));
+    CHECK_FALSE(outline_wrap_place(wrap, Vec3f(1.f, 5.f, 15.f), share, rise));
+
+    // A part that is C-shaped all the way up has no usable cross-section at all, which is what makes
+    // compute_outline_wrap_uvs() hand back nothing and the whole layer fall back to Cylindrical.
+    const indexed_triangle_set all_c = make_c_prism(0.f, 20.f);
+    CHECK_FALSE(build_outline_wrap(all_c).usable());
+    TextureDisplacementLayer layer;
+    layer.projection_method = TextureProjectionMethod::OutlineWrap;
+    CHECK(compute_outline_wrap_uvs(all_c, all_c, layer).empty());
+}
+
+TEST_CASE("the outline wrap starts from the same seam as the cylindrical mapping", "[TextureDisplacement]")
+{
+    // A circular cylinder is the one shape where wrapping by outline and wrapping by angle agree, so
+    // it is where the two can be checked to start in the same place and run the same way round: a
+    // layer switched between the two mappings must not have its texture jump half a turn.
+    const indexed_triangle_set cyl  = its_make_cylinder(10., 20.);
+    const OutlineWrap          wrap = build_outline_wrap(cyl);
+    REQUIRE(wrap.usable());
+
+    // Counterclockwise seen from +Z, starting at the -Y side.
+    const auto point = GENERATE(table<Vec3f, float>({
+        { Vec3f(10.f, 0.f, 10.f), 0.25f },
+        { Vec3f(0.f, 10.f, 10.f), 0.50f },
+        { Vec3f(-10.f, 0.f, 10.f), 0.75f },
+    }));
+    float share = 0.f, rise = 0.f;
+    REQUIRE(outline_wrap_place(wrap, std::get<0>(point), share, rise));
+    CHECK_THAT(share, WithinAbs(std::get<1>(point), 2e-3f));
+}
+
+// The mapping is stored as TextureProjectionMethod's integer value, so a project written by a build
+// that knew more of them than this one must not silently read back as a different mapping.
+TEST_CASE("an unknown projection method loads as the default rather than another mapping", "[TextureDisplacement]")
+{
+    std::vector<TextureDisplacementLayer> layers(1);
+    layers[0].slot              = 0;
+    layers[0].projection_method = TextureProjectionMethod::OutlineWrap;
+
+    TextureDisplacementOptions            options;
+    std::vector<TextureDisplacementLayer> read_layers;
+    TextureDisplacementOptions            read_options;
+    REQUIRE(texture_displacement_layers_from_json(texture_displacement_layers_to_json(layers, options),
+                                                  read_layers, read_options));
+    REQUIRE(read_layers.size() == 1);
+    CHECK(read_layers[0].projection_method == TextureProjectionMethod::OutlineWrap);
+
+    // A method from the future, and one from a corrupt document.
+    for (const int projection : { 99, -1 }) {
+        const std::string json = R"({"version":1,"layers":[{"slot":0,"projection_method":)" +
+                                 std::to_string(projection) + "}]}";
+        std::vector<TextureDisplacementLayer> future_layers;
+        TextureDisplacementOptions            future_options;
+        REQUIRE(texture_displacement_layers_from_json(json, future_layers, future_options));
+        REQUIRE(future_layers.size() == 1);
+        CHECK(future_layers[0].projection_method == TextureProjectionMethod::Triplanar);
+    }
+}
+
+// A horizontal grey ramp: the grey level depends only on the column, so a vertex's displacement
+// under it reads back exactly how far along u it landed.
+static std::shared_ptr<std::vector<unsigned char>> make_u_ramp_png(size_t w = 16, size_t h = 16)
+{
+    std::vector<uint8_t> pixels(w * h, 0);
+    for (size_t y = 0; y < h; ++y)
+        for (size_t x = 0; x < w; ++x)
+            pixels[y * w + x] = uint8_t(x * 255 / (w - 1));
+    const boost::filesystem::path tmp_path = boost::filesystem::temp_directory_path()
+        / boost::filesystem::unique_path("texdisp_test_%%%%%%%%.png");
+    REQUIRE(Slic3r::png::write_gray_to_file(tmp_path.string(), w, h, pixels));
+
+    std::vector<unsigned char> bytes;
+    {
+        std::ifstream ifs(tmp_path.string(), std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    }
+    boost::system::error_code ec;
+    boost::filesystem::remove(tmp_path, ec);
+
+    REQUIRE_FALSE(bytes.empty());
+    return std::make_shared<std::vector<unsigned char>>(std::move(bytes));
+}
+
+// The property the outline wrap exists for, read off a real bake rather than off the mapping alone.
+// A 10 mm cube has a 40 mm outline; at a tile size of 5 mm exactly eight whole repeats fit it, so the
+// four top corners - 10 mm, two whole repeats, apart along the outline - sit at the very same place
+// in the texture and must be displaced by the very same amount. Mapped cylindrically the same four
+// corners sit at four different places, because an angle is not a distance on a box.
+TEST_CASE("an outline-wrapped pattern repeats evenly around a box", "[TextureDisplacement]")
+{
+    const indexed_triangle_set    cube = its_make_cube(10., 10., 10.);
+    TextureDisplacementFacetsData facets{};
+    facets[0] = paint_whole_mesh(cube);
+
+    TextureDisplacementLayer layer;
+    layer.slot         = 0;
+    layer.depth_mm     = 2.f;
+    layer.tiling_scale = 5.f;
+    layer.image_data   = make_u_ramp_png();
+    // Off the ramp's black first column, so "the same place in the texture" is a visible height
+    // rather than no displacement at all.
+    layer.offset       = Vec2f(0.3f, 0.f);
+
+    const auto top_corner_moves = [&](TextureProjectionMethod method) {
+        layer.projection_method = method;
+        const indexed_triangle_set baked = build_texture_displacement(cube, { layer }, facets, classic_options());
+        REQUIRE(baked.vertices.size() == cube.vertices.size());
+        std::vector<float> moves;
+        for (size_t i = 0; i < cube.vertices.size(); ++i)
+            if (above_resting_plane(cube, i))
+                moves.push_back((baked.vertices[i] - cube.vertices[i]).norm());
+        return moves;
+    };
+
+    const std::vector<float> wrapped = top_corner_moves(TextureProjectionMethod::OutlineWrap);
+    REQUIRE(wrapped.size() == 4);
+    CHECK(wrapped.front() > 0.f);
+    for (const float move : wrapped)
+        CHECK_THAT(move, WithinAbs(wrapped.front(), 1e-3f));
+
+    // Not a tautology about the cube's symmetry: the mapping it replaces does not do this.
+    const std::vector<float> cylindrical = top_corner_moves(TextureProjectionMethod::Cylindrical);
+    REQUIRE(cylindrical.size() == 4);
+    CHECK(std::any_of(cylindrical.begin(), cylindrical.end(),
+                      [&](float move) { return std::abs(move - cylindrical.front()) > 1e-3f; }));
 }

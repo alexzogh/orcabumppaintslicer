@@ -97,6 +97,23 @@ enum class TextureProjectionMethod : int
     // offset still do). Falls back to Triplanar when the volume has no channel, exactly as LSCM falls
     // back when a patch cannot be flattened.
     ModelUV       = 5,
+    // Wrapped around the world Z axis by distance along the part's own silhouette outline, rather
+    // than by angle the way Cylindrical does it. On anything that is not a circular cylinder an angle
+    // is not a distance - a box's flat face covers few degrees per millimetre and its corner covers
+    // many - so a regular pattern mapped cylindrically stretches across the faces and bunches at the
+    // corners. Measuring along the outline instead keeps its cell size the same all the way round and
+    // runs it unbroken around every corner.
+    //
+    // A whole number of repeats is fitted to the outline's length at every height (see
+    // compute_outline_wrap_uvs()), so the wrap closes on itself at the seam instead of meeting a
+    // part-repeat there - which is also why a rotation that is not a multiple of 90 degrees shows the
+    // seam: it turns those whole repeats into a fraction along the image's own axes.
+    //
+    // Unlike Cylindrical the axis is always world Z through the mesh's bounding box in XY, because
+    // "the outline of the part" only means anything about the axis it is printed around. Where a
+    // cross-section does not go around that axis (a C-shaped section whose opening faces it) there is
+    // no outline to follow, and that band of the part falls back to Cylindrical.
+    OutlineWrap   = 6,
 };
 
 // Dihedral angle (degrees) above which an edge between two painted triangles becomes a chart seam
@@ -872,6 +889,39 @@ std::vector<Vec2f> compute_model_corner_uvs(const indexed_triangle_set &base_mes
                                             const std::vector<Vec2f>   &model_uv,
                                             const indexed_triangle_set &patch,
                                             const std::vector<int>     &patch_source);
+
+// Three UVs per patch triangle, mapped along the part's silhouette outline around Z - the
+// TextureProjectionMethod::OutlineWrap counterpart of compute_lscm_corner_uvs(), laid out the same way
+// (corner k of triangle i at index 3i+k) and, like it, in millimetres: the layer's tiling, rotation
+// and offset are applied on top by whoever samples it.
+//
+// `mesh` is the whole volume the outline is taken from, in the same frame as `patch` (world
+// millimetres for a bake); `patch` is the painted selection being mapped. The outline comes from the
+// volume rather than from the patch so that painting more of a part does not move the pattern already
+// on it. Building it slices the mesh across Z, so the result is cached on the mesh's geometry: every
+// slider on the layer can be dragged without paying for it again.
+//
+// A whole number of texture repeats is fitted to the mean outline length - n = round(mean length /
+// tile size), at least 1 - and every height is given that same n, so u advances by exactly n repeats
+// over a full loop at every height and the wrap closes at the seam. v is the height risen in the same
+// units, so a repeat stays as tall as it is wide where the outline widens or narrows along Z.
+//
+// Where the outline cannot be followed - a cross-section that does not go around the axis, or one a
+// fold hides too much of - that corner takes TextureProjectionMethod::Cylindrical about the same axis
+// instead, which is continuous with the wrap beside it. Returns an empty vector when the mesh has no
+// usable outline at all; the caller then falls back to Cylindrical for the whole patch.
+std::vector<Vec2f> compute_outline_wrap_corner_uvs(const indexed_triangle_set     &mesh,
+                                                   const indexed_triangle_set     &patch,
+                                                   const TextureDisplacementLayer &layer);
+
+// One UV per patch vertex, the compute_lscm_uvs() counterpart of compute_outline_wrap_corner_uvs():
+// the displacement is per vertex, so a vertex has to settle on one coordinate. Unlike the per-corner
+// form this does *not* bring a triangle straddling the seam onto one side of it - it does not need to.
+// u jumps there by exactly the whole number of repeats that fits the loop, so with Repeat tiling both
+// sides of the seam sample the very same texel, and nothing is interpolated between two vertices.
+std::vector<Vec2f> compute_outline_wrap_uvs(const indexed_triangle_set     &mesh,
+                                            const indexed_triangle_set     &patch,
+                                            const TextureDisplacementLayer &layer);
 
 // One UV per patch vertex, collapsed from a per-corner array: the first corner to reach a vertex wins.
 // This is the per-corner/per-vertex split compute_lscm_uvs() documents, applied to any corner array -
