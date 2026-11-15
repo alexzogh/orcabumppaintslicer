@@ -13,12 +13,14 @@
 #include "slic3r/GUI/GUI.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ColorDecomposeRecipe.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "GLGizmoUtils.hpp"
 
 
 #include <cstddef>
 #include <cassert>
+#include <limits>
 #include <algorithm>
 #include <array>
 #include <glad/gl.h>
@@ -30,6 +32,7 @@
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoBase.hpp"
 #include "libslic3r/Color.hpp"
+#include <wx/utils.h>
 #include <imgui.h>
 #include <wx/colour.h>
 #include "libslic3r/TriangleSelector.hpp"
@@ -109,6 +112,10 @@ static std::vector<int> get_extruder_id_for_volumes(const ModelObject &model_obj
 
 void GLGizmoMmuSegmentation::init_extruders_data()
 {
+    // The cached solves are answers about a particular set of loaded filaments.
+    for (ColorPreview &preview : m_color_preview)
+        preview.valid = false;
+
     m_extruders_colors      = wxGetApp().plater()->get_extruders_colors();
     m_selected_extruder_idx = 0;
 
@@ -130,6 +137,19 @@ bool GLGizmoMmuSegmentation::on_init()
     const wxString alt   = GUI::shortkey_alt_prefix();
     const wxString shift = GUI::shortkey_shift_prefix();
 
+    m_desc["color_section"]       = _L("Color");
+    m_desc["color_wanted"]        = _L("Wanted");
+    m_desc["color_printed"]       = _L("What this will actually print as");
+    m_desc["color_gamut"]         = _L("The loaded filaments cannot mix to this color. The swatch shows the closest they reach.");
+    m_desc["color_paint_with"]    = _L("Paint with this color");
+    m_desc["color_paint_with_hint"] = _L("Selects a filament that prints this color, blending the loaded filaments into a new mixed filament when none of them is close enough on its own.");
+    m_desc["color_gradient"]      = _L("Gradient");
+    m_desc["color_from"]          = _L("From");
+    m_desc["color_to"]            = _L("To");
+    m_desc["color_steps"]         = _L("Steps");
+    m_desc["color_axis"]          = _L("Axis");
+    m_desc["color_apply_gradient"] = _L("Apply gradient");
+    m_desc["color_gradient_hint"] = _L("Paints a band of each color in turn along the chosen axis, across whatever is painted with the selected filament - or across the whole object when nothing is. Each step needs a filament slot of its own.");
     m_desc["cursor_size"]      = _L("Brush size");
     m_desc["cursor_type"]      = _L("Brush shape");
     m_desc["paint"]            = _L("Paint");
@@ -465,6 +485,8 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
         if (extruder_idx < int(GLGizmoMmuSegmentation::EXTRUDERS_LIMIT) && ImGui::IsItemHovered()) m_imgui->tooltip(wxString::Format(_L("Shortcut Key %d"), extruder_idx + 1), max_tooltip_width);
     }
+    render_color_mix_ui(max_tooltip_width);
+
     // ORCA: Remap filaments section (Border only, Title in border). 
     // Styled as a panel for visual grouping.
     if (ImGui::TreeNodeEx(m_desc.at("perform_remap").c_str(), ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding)){
@@ -1001,6 +1023,326 @@ void GLGizmoMmuSegmentation::update_used_filaments()
                  m_used_filaments.insert((size_t)idx);
         }
     }
+}
+
+void GLGizmoMmuSegmentation::physical_filaments(std::vector<ColorDecomposePhysicalFilament> &palette,
+                                                std::string                                 &preferred_type) const
+{
+    palette.clear();
+    preferred_type.clear();
+
+    // The sidebar already keeps the mapping from physical filament to project config slot, and a
+    // mixed slot is an interleave of physical filaments rather than one in its own right - so its
+    // physical-only list is exactly the candidate set, and rebuilding it here would only drift.
+    std::vector<std::string> colors, names, types;
+    std::vector<size_t>      config_indices;
+    wxGetApp().plater()->sidebar().collect_physical_filament_info(colors, names, types, &config_indices);
+
+    const size_t count = std::min({colors.size(), names.size(), types.size(), config_indices.size()});
+    palette.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        ColorDecomposePhysicalFilament filament;
+        filament.color_hex      = colors[i];
+        filament.name           = names[i];
+        filament.type           = types[i];
+        filament.filament_index = unsigned(config_indices[i] + 1);
+        palette.push_back(std::move(filament));
+
+        // Interleaving two materials that want different temperatures prints badly whatever colour
+        // it comes out, so the solver is asked to keep to the one already being painted with. Only a
+        // physical slot names a material; painting with a mixed one leaves this empty, which the
+        // solver reads as no preference.
+        if (config_indices[i] == m_selected_extruder_idx)
+            preferred_type = types[i];
+    }
+}
+
+int GLGizmoMmuSegmentation::slot_for_color(const ColorRGB &wanted)
+{
+    std::vector<ColorDecomposePhysicalFilament> palette;
+    std::string                                 preferred_type;
+    this->physical_filaments(palette, preferred_type);
+    if (palette.size() < 2)
+        return -1;
+
+    const ColorDecomposeRgb          target{wanted.r_uchar(), wanted.g_uchar(), wanted.b_uchar()};
+    const ColorDecomposeRecipeResult recipe = recommend_from_physical_filaments(target, palette, preferred_type);
+    if (!recipe.valid || recipe.components.empty())
+        return -1;
+
+    // One component means a loaded filament already prints this colour. Spending a filament slot on
+    // a "mix" of it with itself would buy nothing.
+    if (recipe.components.size() == 1) {
+        const unsigned int id = recipe.components.front().filament_index;
+        return id == 0 ? -1 : int(id) - 1;
+    }
+
+    std::vector<unsigned int> components;
+    std::vector<int>          ratios;
+    components.reserve(recipe.components.size());
+    ratios.reserve(recipe.components.size());
+    for (const ColorDecomposeRecipeComponent &component : recipe.components) {
+        // A zero index is one of the solver's standard base colours rather than a loaded filament.
+        // recommend_from_physical_filaments() only ever names loaded ones, but there is nothing to
+        // interleave if that changes, so this does not guess at a substitute.
+        if (component.filament_index == 0)
+            return -1;
+        components.push_back(component.filament_index);
+        ratios.push_back(component.ratio);
+    }
+
+    // Reuses a slot that already blends these filaments in these proportions, and only creates one
+    // when none does - so painting several shades of the same colour does not fill the project with
+    // near-duplicate slots.
+    return wxGetApp().plater()->sidebar().ensure_mixed_filament(components, ratios);
+}
+
+int GLGizmoMmuSegmentation::apply_color_gradient(const ColorRGB &from, const ColorRGB &to, int steps, int axis)
+{
+    ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr || steps < 2 || axis < 0 || axis > 2 || m_triangle_selectors.empty())
+        return -1;
+
+    // One solve per step, each against the table of measured blends, is slow enough that the window
+    // would otherwise sit there looking hung for about a second.
+    wxBusyCursor wait;
+
+    // Every step's slot has to exist before anything is painted. Adding a filament runs
+    // ModelVolume::update_extruder_count() and rebuilds the selectors, which would throw away paint
+    // applied in the same pass.
+    std::vector<int> slots;
+    slots.reserve(size_t(steps));
+    for (int i = 0; i < steps; ++i) {
+        // Interpolated as the picker shows them rather than in linear light: these are the
+        // colours the user asked to see spaced evenly, and each one is solved on its own.
+        const int slot = this->slot_for_color(lerp(from, to, float(i) / float(steps - 1)));
+        if (slot < 0)
+            return -1;
+        slots.push_back(slot);
+    }
+    // Adding a filament can rebuild the selectors from what the model holds, so anything painted
+    // but not yet written back has to be written back first or it would be dropped here.
+    this->update_model_object();
+    // Brings the gizmo's own filament list and selectors up to date with the slots just added.
+    this->data_changed(false);
+    if (m_triangle_selectors.empty())
+        return -1;
+
+    const Selection          &selection      = m_parent.get_selection();
+    const Transform3d         instance       = mo->instances[selection.get_instance_idx()]->get_transformation().get_matrix();
+    const EnforcerBlockerType selected_state = EnforcerBlockerType(m_selected_extruder_idx + 1);
+
+    // Where each triangle sits along the axis, measured in world space because that is the axis the
+    // user picked: a rotated object would otherwise ramp along a direction that is not the one named
+    // in the panel. Gathered up front so the ramp can be stretched across the region's own extent
+    // rather than across the whole build volume.
+    struct Hit
+    {
+        size_t volume = 0;
+        int    facet  = 0;
+        double along  = 0.0;
+    };
+    std::vector<Hit> hits;
+    double           lo = std::numeric_limits<double>::max();
+    double           hi = std::numeric_limits<double>::lowest();
+
+    std::vector<const ModelVolume *> parts;
+    for (const ModelVolume *mv : mo->volumes)
+        if (mv->is_model_part())
+            parts.push_back(mv);
+    if (parts.size() > m_triangle_selectors.size())
+        parts.resize(m_triangle_selectors.size());
+
+    const auto add = [&](size_t volume, const Transform3d &trafo, int facet, const Vec3f &a, const Vec3f &b,
+                         const Vec3f &c) {
+        const Vec3d  centroid = (a.cast<double>() + b.cast<double>() + c.cast<double>()) / 3.0;
+        const double along    = (trafo * centroid)[axis];
+        lo                    = std::min(lo, along);
+        hi                    = std::max(hi, along);
+        hits.push_back({volume, facet, along});
+    };
+
+    // Whatever is painted with the selected filament, across every part of the object: that is the
+    // region the gradient fills.
+    //
+    // get_facets_strict() hands back the sub-triangles the brush actually covered, and source_facet
+    // names the mesh triangle each one came from. Painting is per whole triangle, so a triangle the
+    // stroke only clipped still lands wholly in one band - the gradient is coarsened to the mesh,
+    // exactly as every other filament assignment is.
+    for (size_t v = 0; v < parts.size(); ++v) {
+        const Transform3d          trafo = instance * parts[v]->get_matrix();
+        std::vector<int>           source_facet;
+        const indexed_triangle_set painted = m_triangle_selectors[v]->get_facets_strict(selected_state, &source_facet);
+        if (source_facet.size() != painted.indices.size())
+            continue;
+
+        for (size_t t = 0; t < painted.indices.size(); ++t) {
+            const auto &f = painted.indices[t];
+            add(v, trafo, source_facet[t], painted.vertices[f[0]], painted.vertices[f[1]], painted.vertices[f[2]]);
+        }
+    }
+
+    // Nothing anywhere is painted with it, so the gradient has no region to fill and takes the whole
+    // object instead. That is the useful default - a gradient over a model is the common case - and
+    // confining it to part of one means painting that part first. Deciding this across every part at
+    // once matters: per part, a model with one part painted would have its others ramped in full.
+    if (hits.empty())
+        for (size_t v = 0; v < parts.size(); ++v) {
+            const Transform3d           trafo = instance * parts[v]->get_matrix();
+            const indexed_triangle_set &its   = parts[v]->mesh().its;
+            for (size_t t = 0; t < its.indices.size(); ++t) {
+                const auto &f = its.indices[t];
+                add(v, trafo, int(t), its.vertices[f[0]], its.vertices[f[1]], its.vertices[f[2]]);
+            }
+        }
+
+    if (hits.empty())
+        return 0;
+
+    const double span = hi - lo;
+    for (const Hit &hit : hits) {
+        // A region with no extent along the axis - a flat plate asked for a Z gradient - has no ramp
+        // to make, so all of it takes the first colour rather than dividing by zero.
+        const double t    = span > 1e-6 ? (hit.along - lo) / span : 0.0;
+        const int    step = std::clamp(int(t * double(steps)), 0, steps - 1);
+        m_triangle_selectors[hit.volume]->set_facet(hit.facet, EnforcerBlockerType(slots[size_t(step)] + 1));
+    }
+
+    for (auto &selector : m_triangle_selectors)
+        selector->request_update_render_data(true);
+    this->update_model_object();
+    m_parent.set_as_dirty();
+    return int(hits.size());
+}
+
+void GLGizmoMmuSegmentation::render_color_mix_ui(float max_tooltip_width)
+{
+    if (m_extruders_colors.empty())
+        return;
+
+    std::vector<ColorDecomposePhysicalFilament> palette;
+    std::string                                 preferred_type;
+    this->physical_filaments(palette, preferred_type);
+    // Interleaving needs two filaments to alternate between; with one loaded there is nothing to
+    // solve and the section would only offer a colour it could never print.
+    if (palette.size() < 2)
+        return;
+
+    if (!ImGui::TreeNodeEx(m_desc.at("color_section").c_str(), ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding))
+        return;
+
+    constexpr ImGuiColorEditFlags picker_flags = ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel;
+    constexpr ImGuiColorEditFlags swatch_flags = ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop;
+    const float                   swatch       = ImGui::GetFrameHeight();
+
+    // The colour that will actually be printed, drawn next to the one asked for. A palette reaches
+    // only the colours between its filaments, and nothing else in the flow reveals that a colour is
+    // outside it - without this swatch the first sign is the finished print.
+    // A solve weighs every pair and triple of the loaded filaments against a table of measured
+    // blends, which is far more work than a frame can absorb. The answer is therefore kept until the
+    // wanted colour moves, and while anything is being dragged the last answer is shown and the new
+    // one solved once the drag ends - so dragging a picker stays smooth and settles when released.
+    const bool dragging = ImGui::IsAnyItemActive();
+
+    const auto draw_printed_swatch = [&](const char *id, int cache_slot, const float *wanted) {
+        ColorPreview &cached = m_color_preview[cache_slot];
+        const bool    moved  = !cached.valid || cached.wanted[0] != wanted[0] ||
+                           cached.wanted[1] != wanted[1] || cached.wanted[2] != wanted[2];
+        if (moved && !(dragging && cached.valid)) {
+            const ColorRGB          target{wanted[0], wanted[1], wanted[2]};
+            const ColorDecomposeRgb rgb{target.r_uchar(), target.g_uchar(), target.b_uchar()};
+
+            const ColorDecomposeRecipeResult recipe = recommend_from_physical_filaments(rgb, palette, preferred_type);
+
+            // matched_color_hex is what the recipe prints as rather than an average of its
+            // components: blend_color_multi() prefers a measured blend from the standard recipe
+            // table wherever there is one, so this is closer to the finished print than arithmetic.
+            ColorRGB   printed = target;
+            const bool solved  = recipe.valid && decode_color(recipe.matched_color_hex, printed);
+
+            const float dr = printed.r() - target.r();
+            const float dg = printed.g() - target.g();
+            const float db = printed.b() - target.b();
+            // About five percent out in a channel: inside that the print reads as the colour asked
+            // for, and outside it the user should be told that it will not.
+            cached.printed   = printed;
+            cached.reachable = solved && dr * dr + dg * dg + db * db <= 0.0025f;
+            cached.wanted[0] = wanted[0];
+            cached.wanted[1] = wanted[1];
+            cached.wanted[2] = wanted[2];
+            cached.valid     = true;
+        }
+
+        ImGui::SameLine();
+        ImGui::ColorButton(id, ImVec4(cached.printed.r(), cached.printed.g(), cached.printed.b(), 1.0f), swatch_flags,
+                           ImVec2(swatch, swatch));
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(cached.reachable ? m_desc.at("color_printed") : m_desc.at("color_gamut"), max_tooltip_width);
+    };
+
+    m_imgui->text(m_desc.at("color_wanted"));
+    ImGui::SameLine();
+    ImGui::ColorEdit3("##mix_wanted", m_mix_wanted, picker_flags);
+    draw_printed_swatch("##mix_printed", 0, m_mix_wanted);
+
+    if (m_imgui->button(m_desc.at("color_paint_with"))) {
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Paint with a mixed color"), UndoRedo::SnapshotType::GizmoAction);
+
+        const int slot = this->slot_for_color(ColorRGB{m_mix_wanted[0], m_mix_wanted[1], m_mix_wanted[2]});
+        if (slot < 0) {
+            show_error(nullptr, _u8L("There is no room for another filament slot, so this color cannot be mixed."));
+        } else {
+            // The slot may be new, in which case the gizmo has not seen it yet - and taking it on
+            // can rebuild the selectors, so unwritten paint is written back first.
+            this->update_model_object();
+            this->data_changed(false);
+            m_selected_extruder_idx = size_t(slot);
+        }
+    }
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(m_desc.at("color_paint_with_hint"), max_tooltip_width);
+
+    ImGui::Separator();
+    m_imgui->text(m_desc.at("color_gradient"));
+
+    m_imgui->text(m_desc.at("color_from"));
+    ImGui::SameLine();
+    ImGui::ColorEdit3("##gradient_from", m_gradient_from, picker_flags);
+    draw_printed_swatch("##gradient_from_printed", 1, m_gradient_from);
+
+    m_imgui->text(m_desc.at("color_to"));
+    ImGui::SameLine();
+    ImGui::ColorEdit3("##gradient_to", m_gradient_to, picker_flags);
+    draw_printed_swatch("##gradient_to_printed", 2, m_gradient_to);
+
+    m_imgui->text(m_desc.at("color_steps"));
+    ImGui::SameLine();
+    // Each step costs a filament slot of its own, so the cap is about what a project can spare
+    // rather than about what the ramp would look like.
+    constexpr int max_gradient_steps = 8;
+    ImGui::SliderInt("##gradient_steps", &m_gradient_steps, 2, max_gradient_steps);
+
+    m_imgui->text(m_desc.at("color_axis"));
+    ImGui::SameLine();
+    // Axis letters, not prose: the same three names in every language.
+    static const std::vector<std::string> axes{"X", "Y", "Z"};
+    m_imgui->combo(std::string("##gradient_axis"), axes, m_gradient_axis);
+
+    if (m_imgui->button(m_desc.at("color_apply_gradient"))) {
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Apply a color gradient"), UndoRedo::SnapshotType::GizmoAction);
+
+        const int painted = this->apply_color_gradient(ColorRGB{m_gradient_from[0], m_gradient_from[1], m_gradient_from[2]},
+                                                       ColorRGB{m_gradient_to[0], m_gradient_to[1], m_gradient_to[2]},
+                                                       m_gradient_steps, m_gradient_axis);
+        if (painted < 0)
+            show_error(nullptr, _u8L("A gradient needs a filament slot for every step, and there is no room for them."));
+        else if (painted == 0)
+            show_error(nullptr, _u8L("There is nothing here to put a gradient on."));
+    }
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(m_desc.at("color_gradient_hint"), max_tooltip_width);
+
+    ImGui::TreePop();
 }
 
 void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float max_tooltip_width, float scale)

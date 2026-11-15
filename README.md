@@ -1,3 +1,33 @@
+> ## About this fork
+>
+> This is a personal fork of [OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). It is **not**
+> the official OrcaSlicer, is not affiliated with or endorsed by the OrcaSlicer project, and is not
+> a replacement for it. If you are looking for OrcaSlicer itself, go to
+> [orcaslicer.com](https://www.orcaslicer.com/) or
+> [OrcaSlicer/OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). Everything below this box is
+> OrcaSlicer's own README, left as it is.
+>
+> ### What this fork adds
+>
+> **Paint with any colour.** The multi-material paint gizmo can only paint with a filament the
+> project has already loaded. This adds a *Color* section to it: pick any colour and it finds or
+> builds a filament slot that prints it, then leaves that slot selected as the brush. A swatch
+> beside the picker shows what the colour will actually print as, so one the loaded filaments
+> cannot reach is visible before the print rather than after it. The section appears once at least
+> two physical filaments are loaded.
+>
+> **A gradient across what is painted.** Ramps between two colours in a chosen number of steps,
+> along the X, Y or Z axis, across whatever is painted with the selected filament — or across the
+> whole object when nothing is.
+>
+> The colour science behind both is OrcaSlicer's own: the recipe solver in
+> `libslic3r/ColorDecomposeRecipe.hpp` and the mixed filament slots in `libslic3r/FilamentMixer.hpp`,
+> which this fork calls rather than reimplements. OrcaSlicer already fades a mixed filament slot
+> continuously along Z, which is the better tool for a plain fade up a model; the gradient here
+> earns its place along X and Y, and confined to a painted region.
+>
+> Design notes: [`docs/HLSD/paint-color-mixing.md`](docs/HLSD/paint-color-mixing.md).
+
 <div align="center">
 
 <picture>
