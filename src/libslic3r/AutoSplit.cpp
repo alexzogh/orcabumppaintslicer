@@ -712,6 +712,360 @@ Plan plan_by_painted_color(const ModelObject &object, int instance_idx, const Co
     return plan;
 }
 
+// Splitting to reduce supports
+// ----------------------------
+
+namespace {
+
+// One facet of the model, enough to say whether it overhangs and how much that costs.
+struct Facet
+{
+    Vec3d  centre{Vec3d::Zero()};
+    Vec3d  normal{Vec3d::UnitZ()};
+    double area{0.};
+};
+
+std::vector<Facet> facets_of(const indexed_triangle_set &its)
+{
+    std::vector<Facet> facets;
+    facets.reserve(its.indices.size());
+    for (const Vec3i32 &face : its.indices) {
+        const Vec3d a = its.vertices[face(0)].cast<double>();
+        const Vec3d b = its.vertices[face(1)].cast<double>();
+        const Vec3d c = its.vertices[face(2)].cast<double>();
+
+        const Vec3d  cross = (b - a).cross(c - a);
+        const double norm  = cross.norm();
+        if (norm <= 0.)
+            continue;
+
+        Facet facet;
+        facet.centre = (a + b + c) / 3.;
+        facet.normal = cross / norm;
+        facet.area   = 0.5 * norm;
+        facets.push_back(facet);
+    }
+    return facets;
+}
+
+// A facet needs support when the surface it lies on is shallower than the threshold. The
+// slope of a facet from horizontal is the angle between its normal and straight down, so
+// the test on the cosine is the one below. An upward-facing facet never overhangs.
+bool overhangs(const Facet &facet, const Vec3d &build_direction, double cos_threshold)
+{
+    return -facet.normal.dot(build_direction) > cos_threshold;
+}
+
+double cos_of_threshold(double threshold_angle)
+{
+    return std::cos(std::max(0., std::min(90., threshold_angle)) * PI / 180.);
+}
+
+// How close to the lowest point of a piece a facet has to be to count as resting on the
+// bed rather than overhanging it, in mm.
+constexpr double BED_TOLERANCE = 0.05;
+
+// The ways of standing a piece that are worth scoring: as it is, or on one of the two
+// faces the cut has just made. Standing a piece on a cut face is the whole reason cutting
+// helps, and turning it some other way is what auto-orientation is for.
+std::vector<Vec3d> stand_directions(const Vec3d &cut_normal)
+{
+    std::vector<Vec3d> directions{Vec3d::UnitZ()};
+    for (const Vec3d &candidate : {cut_normal, Vec3d(-cut_normal)})
+        if ((candidate - Vec3d::UnitZ()).norm() > 1e-9)
+            directions.push_back(candidate);
+    return directions;
+}
+
+} // namespace
+
+double overhanging_area(const indexed_triangle_set &its, const Vec3d &build_direction, double threshold_angle)
+{
+    const std::vector<Facet> facets    = facets_of(its);
+    const Vec3d              direction = build_direction.normalized();
+    const double             threshold = cos_of_threshold(threshold_angle);
+    if (facets.empty())
+        return 0.;
+
+    // What sits on the bed is held up by the bed, not by support.
+    double lowest = INF;
+    for (const Facet &facet : facets)
+        lowest = std::min(lowest, facet.centre.dot(direction));
+
+    double area = 0.;
+    for (const Facet &facet : facets)
+        if (overhangs(facet, direction, threshold) && facet.centre.dot(direction) > lowest + BED_TOLERANCE)
+            area += facet.area;
+    return area;
+}
+
+Plan plan_to_reduce_supports(const indexed_triangle_set &its,
+                             const SupportSplitParams   &params,
+                             SupportSplitReport         *report,
+                             Error                      *error)
+{
+    Plan plan;
+    auto fail = [&plan, error](Error reason) {
+        plan.nodes.clear();
+        plan.pieces.clear();
+        if (error != nullptr)
+            *error = reason;
+        return plan;
+    };
+
+    if (error != nullptr)
+        *error = Error::None;
+    if (report != nullptr)
+        *report = SupportSplitReport{};
+    if (its.indices.empty())
+        return plan;
+    if (params.max_pieces < 1)
+        return fail(Error::TooManyPieces);
+
+    const std::vector<Facet> facets    = facets_of(its);
+    const double             threshold = cos_of_threshold(params.threshold_angle);
+    if (facets.empty())
+        return plan;
+
+    std::vector<Vec3d> directions = params.directions;
+    if (directions.empty())
+        directions = default_split_directions();
+
+    std::vector<uint32_t> whole(facets.size());
+    for (size_t i = 0; i < facets.size(); ++i)
+        whole[i] = uint32_t(i);
+
+    // Facets lying on the bed with the model upright are held up by the bed. Taken from
+    // the whole model, so a piece cut off above the bed is scored as though it still had
+    // to stand where it is — which overstates what standing it upright costs, and so only
+    // ever makes the planner prefer standing it on a cut face. The cut faces themselves
+    // are scored exactly, below.
+    double lowest_z = INF;
+    for (const Facet &facet : facets)
+        lowest_z = std::min(lowest_z, facet.centre.z());
+    std::vector<uint8_t> on_bed(facets.size(), 0);
+    for (size_t i = 0; i < facets.size(); ++i)
+        on_bed[i] = facets[i].centre.z() <= lowest_z + BED_TOLERANCE ? 1 : 0;
+
+    auto counts = [&facets, &on_bed, threshold](uint32_t i, const Vec3d &direction) {
+        if (!overhangs(facets[i], direction, threshold))
+            return false;
+        // Only the upright stand can rest on the model's own bottom face.
+        return !(on_bed[i] != 0 && (direction - Vec3d::UnitZ()).norm() < 1e-9);
+    };
+
+    auto area_for = [&facets, &counts](const std::vector<uint32_t> &region, const Vec3d &direction) {
+        double area = 0.;
+        for (const uint32_t i : region)
+            if (counts(i, direction))
+                area += facets[i].area;
+        return area;
+    };
+
+    // Printing the model as it stands is the number to beat, and the one to report.
+    const double upright = area_for(whole, Vec3d::UnitZ());
+    if (report != nullptr) {
+        report->overhang_before = upright;
+        report->overhang_after  = upright;
+    }
+
+    struct Pending
+    {
+        std::vector<uint32_t>  region;
+        std::vector<Halfspace> bounds;
+        Vec3d                  direction{Vec3d::UnitZ()};
+        double                 overhang{0.};
+        int                    parent{-1};
+        bool                   parent_upper{false};
+    };
+    std::vector<Pending> pending;
+    pending.push_back(Pending{std::move(whole), {}, Vec3d::UnitZ(), upright, -1, false});
+
+    double achieved = 0.;
+
+    auto finish_piece = [&plan, &achieved](const Pending &region) {
+        Piece piece;
+        piece.build_direction = region.direction;
+        achieved += region.overhang;
+
+        const int branch = piece_to_branch(int(plan.pieces.size()));
+        plan.pieces.push_back(piece);
+        if (region.parent >= 0)
+            (region.parent_upper ? plan.nodes[region.parent].upper : plan.nodes[region.parent].lower) = branch;
+    };
+
+    while (!pending.empty()) {
+        Pending current = std::move(pending.back());
+        pending.pop_back();
+
+        // What the best cut found so far leaves behind, and how to make it.
+        struct Candidate
+        {
+            CutPlane plane;
+            Vec3d    upper_direction{Vec3d::UnitZ()};
+            Vec3d    lower_direction{Vec3d::UnitZ()};
+            double   upper_overhang{0.};
+            double   lower_overhang{0.};
+            double   total{INF};
+            double   score{INF};
+            bool     found{false};
+        };
+        Candidate best;
+
+        // Two cuts often leave the same overhang — a T can be cut below its crossbar, or
+        // down the middle with each half laid on its side. Prefer the one that leaves the
+        // pieces standing as they are: turning a piece over is work for whoever prints it,
+        // and it is only worth it when it buys something. The nudge is small enough that
+        // it only ever decides between cuts that are otherwise equal.
+        double region_area = 0.;
+        for (const uint32_t i : current.region)
+            region_area += facets[i].area;
+        const double turn_nudge = 1e-6 * region_area;
+
+        if (int(plan.nodes.size()) + 2 <= params.max_pieces && !current.region.empty()) {
+            for (const Vec3d &raw : directions) {
+                const Vec3d normal = raw.normalized();
+
+                double lo = INF;
+                double hi = -INF;
+                for (const uint32_t i : current.region) {
+                    const double d = normal.dot(facets[i].centre);
+                    lo             = std::min(lo, d);
+                    hi             = std::max(hi, d);
+                }
+                if (!(hi - lo > 2. * params.min_piece_size))
+                    continue; // No room to cut this way without making a sliver.
+
+                const std::vector<Vec3d> stands = stand_directions(normal);
+                const size_t             bins   = size_t(std::max(2, params.position_samples));
+                const double             span   = hi - lo;
+
+                // Overhanging area per bin, for every way of standing the piece. One pass
+                // over the facets fills the lot; the sweep then costs nothing per
+                // position. `per_bin` is kept as well as the running total, because a
+                // facet sitting right at the cut is resting on the cut face when the
+                // piece is stood on it, and so is not overhanging after all.
+                std::vector<double> per_bin(stands.size() * bins, 0.);
+                std::vector<double> total(stands.size(), 0.);
+                for (const uint32_t i : current.region) {
+                    size_t bin = size_t((normal.dot(facets[i].centre) - lo) / span * double(bins));
+                    bin        = std::min(bin, bins - 1);
+                    for (size_t s = 0; s < stands.size(); ++s)
+                        if (counts(i, stands[s])) {
+                            per_bin[s * bins + bin] += facets[i].area;
+                            total[s] += facets[i].area;
+                        }
+                }
+                std::vector<double> below(stands.size() * bins, 0.);
+                for (size_t s = 0; s < stands.size(); ++s) {
+                    below[s * bins] = per_bin[s * bins];
+                    for (size_t bin = 1; bin < bins; ++bin)
+                        below[s * bins + bin] = below[s * bins + bin - 1] + per_bin[s * bins + bin];
+                }
+
+                // Which stand means "lying on the cut face" for each side of the cut.
+                const auto stands_on_cut = [&normal](const Vec3d &stand, bool upper) {
+                    return ((upper ? stand : Vec3d(-stand)) - normal).norm() < 1e-9;
+                };
+
+                // At least one bin each side, so the bin just past the split is always
+                // there to be read and no piece comes out a sliver.
+                const size_t margin = std::max<size_t>(1, size_t(std::ceil(params.min_piece_size / span * double(bins))));
+                for (size_t bin = margin; bin + margin < bins; ++bin) {
+                    double lower_best = INF;
+                    double upper_best = INF;
+                    Vec3d  lower_dir  = Vec3d::UnitZ();
+                    Vec3d  upper_dir  = Vec3d::UnitZ();
+                    for (size_t s = 0; s < stands.size(); ++s) {
+                        double lower = below[s * bins + bin];
+                        double upper = total[s] - lower;
+                        // Standing a piece on the face the cut just made puts everything
+                        // at that face on the bed.
+                        if (stands_on_cut(stands[s], false))
+                            lower -= per_bin[s * bins + bin];
+                        if (stands_on_cut(stands[s], true))
+                            upper -= per_bin[s * bins + bin + 1];
+                        lower = std::max(0., lower);
+                        upper = std::max(0., upper);
+
+                        if (lower < lower_best) {
+                            lower_best = lower;
+                            lower_dir  = stands[s];
+                        }
+                        if (upper < upper_best) {
+                            upper_best = upper;
+                            upper_dir  = stands[s];
+                        }
+                    }
+
+                    const auto turned = [](const Vec3d &stand) {
+                        return (stand - Vec3d::UnitZ()).norm() < 1e-9 ? 0. : 1.;
+                    };
+                    const double score = lower_best + upper_best +
+                                         turn_nudge * (turned(lower_dir) + turned(upper_dir));
+
+                    if (score < best.score) {
+                        best.score           = score;
+                        best.total           = lower_best + upper_best;
+                        best.found           = true;
+                        best.lower_overhang  = lower_best;
+                        best.upper_overhang  = upper_best;
+                        best.lower_direction = lower_dir;
+                        best.upper_direction = upper_dir;
+                        best.plane.normal    = normal;
+                        best.plane.origin    = normal * (lo + span * double(bin + 1) / double(bins));
+                    }
+                }
+            }
+        }
+
+        // A cut has to earn itself: the pieces have to be glued back together, so shaving
+        // a little overhang off is not worth making two parts for.
+        const bool worth_it = best.found && best.total < current.overhang * (1. - params.min_improvement);
+        if (!worth_it) {
+            finish_piece(current);
+            continue;
+        }
+
+        PlanNode node;
+        node.plane      = best.plane;
+        node.connectors = plan_connectors(its, node.plane, current.bounds, params.connectors);
+
+        const int index = int(plan.nodes.size());
+        plan.nodes.push_back(std::move(node));
+        if (current.parent >= 0)
+            (current.parent_upper ? plan.nodes[current.parent].upper : plan.nodes[current.parent].lower) = index;
+
+        const Vec3d  normal = best.plane.normal;
+        const double offset = normal.dot(best.plane.origin);
+
+        Pending upper{{}, current.bounds, best.upper_direction, best.upper_overhang, index, true};
+        Pending lower{{}, current.bounds, best.lower_direction, best.lower_overhang, index, false};
+        upper.bounds.push_back(Halfspace{normal, offset});
+        lower.bounds.push_back(Halfspace{-normal, -offset});
+
+        for (const uint32_t i : current.region)
+            (normal.dot(facets[i].centre) >= offset ? upper.region : lower.region).push_back(i);
+
+        if (upper.region.empty() || lower.region.empty()) {
+            plan.nodes.pop_back();
+            finish_piece(current);
+            continue;
+        }
+
+        pending.push_back(std::move(lower));
+        pending.push_back(std::move(upper));
+    }
+
+    if (plan.nodes.empty()) {
+        plan.pieces.clear();
+        return plan;
+    }
+    if (report != nullptr)
+        report->overhang_after = achieved;
+    return plan;
+}
+
 namespace {
 
 // Hang the plan's connectors on `object` the way the cut gizmo does, so Cut carves the
@@ -859,6 +1213,22 @@ bool execute(const Plan          &plan,
         added->cut_id.invalidate();
         if (params.number_pieces)
             added->name = object.name + " - " + std::to_string(++number);
+
+        // Turn the piece so the face the plan wants on the bed ends up there. The cuts are
+        // all made by now, so no plane depends on this piece's frame any more.
+        const Vec3d up = plan.pieces[i].build_direction;
+        if (params.apply_piece_build_direction) {
+            if (up.squaredNorm() > 0. && (up.normalized() - Vec3d::UnitZ()).norm() > 1e-9) {
+                const Transform3d turn(Eigen::Quaterniond::FromTwoVectors(up.normalized(), Vec3d::UnitZ()));
+                for (ModelInstance *instance : added->instances) {
+                    const Transform3d turned = turn * instance->get_transformation().get_rotation_matrix();
+                    instance->set_rotation(Geometry::Transformation(turned).get_rotation());
+                }
+            }
+            // A piece cut off above the bed is left floating where it was, so stand it
+            // down whether or not it had to be turned.
+            added->ensure_on_bed();
+        }
 
         const int extruder = plan.pieces[i].extruder;
         if (params.apply_piece_extruder && extruder > 0) {
