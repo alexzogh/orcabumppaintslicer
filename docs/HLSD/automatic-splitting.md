@@ -3,19 +3,19 @@
 ## Purpose and scope
 
 Automatic splitting cuts an object into pieces for a reason the user states, instead of asking them to place each
-plane by hand in the Cut tool. There are two reasons in place today:
+plane by hand in the Cut tool. There are three reasons in place:
 
 - *Split to Fit the Plate* — the object is larger than the printer, and the pieces have to be small enough to
   print.
 - *Split by Painted Colour* — the object is painted for several filaments, and each piece should print in one of
   them and be assembled afterwards.
+- *Split to Reduce Supports* — the object overhangs itself, and cutting it lets the pieces stand on faces that
+  print without support.
 
-A third, splitting to reduce overhangs, is meant to join them, because the part that differs between reasons is
-only the choice of planes.
-
-Both are reached from the *Modify* submenu of the object context menu. Neither does anything to an object that has
-no reason to be split, and both are absent for SLA and for objects that came out of the Cut tool; the colour one
-is absent unless the object carries multi-material paint.
+All three are reached from the *Modify* submenu of the object context menu, and all three share everything except
+the choice of planes. None does anything to an object that has no reason to be split, and all are absent for SLA
+and for objects that came out of the Cut tool; the colour one is absent unless the object carries
+multi-material paint.
 
 The geometry lives in `src/libslic3r/AutoSplit.{hpp,cpp}` and the menu and plater wiring in
 `src/slic3r/GUI/GUI_Factories.cpp` and `src/slic3r/GUI/Plater.cpp`.
@@ -28,11 +28,12 @@ The geometry lives in `src/libslic3r/AutoSplit.{hpp,cpp}` and the menu and plate
 the connectors to seat on it, each side pointing either at the node that splits it further or at nothing, meaning
 that side is a finished piece. Planning touches no `Model`, no instance and no GUI, so a strategy can be tested on
 a bare mesh — which is what `tests/libslic3r/test_auto_split.cpp` does. A strategy is a function that produces a
-`Plan`; `plan_fit_build_plate()` and `plan_by_painted_color()` are the two there are.
+`Plan`; `plan_fit_build_plate()`, `plan_by_painted_color()` and `plan_to_reduce_supports()` are the three
+there are.
 
 A `Plan` also names its leaves. Each side of a node points either at the node that splits it further or at an
 entry in `Plan::pieces`, which is where a strategy records what it knows about a finished piece — today, the
-filament it should print in. `execute()` returns the pieces in that order, so a caller can line the two up.
+filament it should print in and which way up it should be printed. `execute()` returns the pieces in that order, so a caller can line the two up.
 
 **Execution** is shared. `execute()` walks the tree, drives the existing `Cut` class once per node, and appends the
 leaves to a `Model` the caller owns. Nothing about it is specific to why the planes were chosen, so a new strategy
@@ -121,6 +122,41 @@ A piece that was given a filament of its own has its paint removed, because it n
 leaving the paint on would reinstate the very colours the split was asked to separate. `ExecuteParams` can turn
 that off.
 
+## Choosing planes to reduce supports
+
+A part prints without support when every downward surface is steep enough for the layer below to reach it: a
+shape with a flat base that rises without overhangs, which the literature calls pyramidal. Cutting a model into
+pyramidal parts is the exact version of this problem and it is NP-hard. The published approximate method (Hu, Li,
+Zhang and Cohen-Or, *Approximate pyramidal shape decomposition*, SIGGRAPH Asia 2014) recasts it as an exact-cover
+problem over clustered building blocks and solves that globally.
+
+This is not that and does not claim to be. It is a greedy planar heuristic: try planes, keep the one whose two
+pieces leave the least overhanging area, stop when no plane helps enough, and report the area before and after.
+It does not promise support-free pieces, the fewest pieces, or the best cut.
+
+Cutting only helps because a piece can then be turned over. A cut makes a new flat face, and the overhang that
+needed support is often directly above it, so the piece can be stood on the cut face and printed the other way
+up. Each piece therefore carries the direction that should end up pointing at the ceiling, and a cut is scored by
+what the pieces cost *once they are turned*. The directions scored for a piece are the way it already stands and
+the two ways its cut face can be put down; turning a piece some other way is what auto-orientation
+(`src/libslic3r/Orient.cpp`) is for, and it is better at it.
+
+A facet needs support when its slope from horizontal is below `support_threshold_angle`, which for a facet normal
+`n` and a build direction `d` is `-n · d > cos(threshold)`. Two things are not overhangs and are subtracted:
+whatever rests on the bed, and whatever rests on the cut face when a piece is stood on it. The bed contact is
+taken from the whole model rather than per piece, which overstates what standing a cut-off piece upright costs
+and so only ever pushes the planner towards standing it on a cut face — the case that is scored exactly.
+
+The sweep works like the colour one: bin the facets along a direction, prefix-sum the overhanging area per way of
+standing, then read off every split position in constant time. A cut is made only when it removes at least
+`min_improvement` of the overhanging area, because the pieces have to be glued back together and shaving a little
+off is not worth that.
+
+Two cuts often leave exactly the same overhang — a T can be cut below its crossbar, or down the middle with each
+half laid on its side, and both print without support. A small nudge in the score prefers the cut that leaves the
+pieces standing as they are, since turning a piece over is work for whoever prints it. The nudge is far smaller
+than any real difference in area, so it only ever decides between cuts that are otherwise equal.
+
 ## Connectors
 
 The planner puts connectors on each plane so the pieces locate and glue together. It slices the model at the plane,
@@ -155,5 +191,12 @@ tries thirteen directions.
 
 A colour split is an approximation and does not pretend otherwise. Paint whose boundary is not close to planar is
 left alone rather than cut badly, and even a split the planner is happy with can leave some painted area on the
-wrong piece. Both planners also measure a region by the centres of its facets, so a facet straddling a plane is
+wrong piece. Every planner also measures a region by the centres of its facets, so a facet straddling a plane is
 counted wholly on one side.
+
+The support split is a heuristic over planes, not a pyramidal decomposition, and the section above says what it
+does not promise. Its overhang measure is the facet-normal test, not what the slicer's own support generator
+would decide: `SupportSpotsGenerator::full_search()` needs an already-sliced `PrintObject`, so it cannot be asked
+during planning, and slicing each candidate plane would be far too slow for a sweep over thirteen directions. The
+measure therefore ignores everything slicing knows — bridges that span a gap, overhangs a perimeter can hold up
+by itself, and how tall an unsupported region is.

@@ -174,6 +174,29 @@ ModelObject *add_box_painted_at_both_ends(Model &model, double x = 100., double 
     return object;
 }
 
+// A T: an upright post with a crossbar on top whose arms hang over nothing. Printed
+// upright the undersides of those arms need support; cut the bar off the post and each
+// piece stands on a flat face.
+indexed_triangle_set tee(double post = 20., double post_height = 60., double bar = 80., double bar_height = 20.)
+{
+    TriangleMesh stem = make_cube(post, post, post_height);
+    stem.translate(float(-post / 2.), float(-post / 2.), 0.f);
+
+    TriangleMesh top = make_cube(bar, post, bar_height);
+    top.translate(float(-bar / 2.), float(-post / 2.), float(post_height));
+
+    indexed_triangle_set its = stem.its;
+    its_merge(its, top.its);
+    return its;
+}
+
+AutoSplit::SupportSplitParams support_params()
+{
+    AutoSplit::SupportSplitParams params;
+    params.connectors.enabled = false;
+    return params;
+}
+
 AutoSplit::ColorSplitParams colour_params()
 {
     AutoSplit::ColorSplitParams params;
@@ -873,4 +896,216 @@ TEST_CASE("Splitting by colour against a missing instance fails rather than cutt
 
     CHECK(plan.empty());
     CHECK(error == AutoSplit::Error::NoSuchInstance);
+}
+
+// Splitting to reduce supports
+// ----------------------------
+
+TEST_CASE("A face resting on the bed is not an overhang", "[AutoSplit]")
+{
+    // Every downward face of a box on the bed is the bottom, which the bed holds up.
+    const indexed_triangle_set box = centred_box(40., 40., 40.);
+
+    CHECK_THAT(AutoSplit::overhanging_area(box, Vec3d::UnitZ(), 30.), WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("An unsupported ledge counts as overhang", "[AutoSplit]")
+{
+    // The crossbar's underside is 80 x 20, of which nothing rests on the bed.
+    const indexed_triangle_set shape = tee();
+
+    CHECK_THAT(AutoSplit::overhanging_area(shape, Vec3d::UnitZ(), 30.), WithinAbs(80. * 20., 1.));
+}
+
+TEST_CASE("A steep wall needs no support but a shallow ceiling does", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    // Turned on its side the crossbar underside becomes a vertical wall, which prints.
+    CHECK(AutoSplit::overhanging_area(shape, Vec3d::UnitX(), 30.) <
+          AutoSplit::overhanging_area(shape, Vec3d::UnitZ(), 30.));
+}
+
+TEST_CASE("A shape with nothing overhanging is not cut to reduce supports", "[AutoSplit]")
+{
+    const indexed_triangle_set box = centred_box(40., 40., 40.);
+
+    AutoSplit::SupportSplitReport report;
+    AutoSplit::Error              error = AutoSplit::Error::None;
+    const AutoSplit::Plan         plan  = AutoSplit::plan_to_reduce_supports(box, support_params(), &report, &error);
+
+    CHECK(plan.empty());
+    CHECK(error == AutoSplit::Error::None); // nothing to do is not a failure
+    CHECK_THAT(report.overhang_before, WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("Splitting an overhanging shape measurably reduces the overhang", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    AutoSplit::SupportSplitReport report;
+    const AutoSplit::Plan plan = AutoSplit::plan_to_reduce_supports(shape, support_params(), &report, nullptr);
+
+    REQUIRE(!plan.empty());
+    CHECK(report.overhang_before > 0.);
+    // The point of the feature: the pieces need less support than the whole did.
+    CHECK(report.overhang_after < report.overhang_before);
+}
+
+TEST_CASE("The crossbar of a T is cut off the post", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee(20., 60., 80., 20.);
+
+    AutoSplit::SupportSplitReport report;
+    const AutoSplit::Plan plan = AutoSplit::plan_to_reduce_supports(shape, support_params(), &report, nullptr);
+
+    REQUIRE(plan.nodes.size() == 1);
+    CHECK(plan.piece_count() == 2);
+    // Laying each half of the T on its side would also print without support, but it asks
+    // whoever prints it to turn both pieces over. Cutting below the crossbar costs nothing
+    // and leaves both pieces standing as they were, so that is the cut to make.
+    CHECK(axis_of(plan.nodes[0].plane.normal) == Z);
+    CHECK_THAT(plan.nodes[0].plane.origin.z(), WithinAbs(60., 2.));
+    for (const AutoSplit::Piece &piece : plan.pieces)
+        CHECK_THAT((piece.build_direction - Vec3d::UnitZ()).norm(), WithinAbs(0., 1e-9));
+
+    // And it removes the overhang rather than merely reducing it.
+    CHECK_THAT(report.overhang_before, WithinAbs(80. * 20., 1.));
+    CHECK_THAT(report.overhang_after, WithinAbs(0., 1.));
+}
+
+TEST_CASE("Each piece records which way up it should print", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    const AutoSplit::Plan plan = AutoSplit::plan_to_reduce_supports(shape, support_params(), nullptr, nullptr);
+    REQUIRE(!plan.empty());
+
+    for (const AutoSplit::Piece &piece : plan.pieces)
+        CHECK_THAT(piece.build_direction.norm(), WithinAbs(1., 1e-9));
+}
+
+TEST_CASE("A cut has to clear the bar set for it", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    SECTION("a cut that clears it is made")
+    {
+        AutoSplit::SupportSplitParams params = support_params();
+        params.min_improvement               = 0.5;
+
+        CHECK(!AutoSplit::plan_to_reduce_supports(shape, params, nullptr, nullptr).empty());
+    }
+
+    SECTION("no cut clears a bar nothing can reach")
+    {
+        // Demanding better than no overhang at all is the setting that refuses every cut,
+        // and the model is left whole rather than cut for nothing.
+        AutoSplit::SupportSplitParams params = support_params();
+        params.min_improvement               = 1.;
+
+        CHECK(AutoSplit::plan_to_reduce_supports(shape, params, nullptr, nullptr).empty());
+    }
+}
+
+TEST_CASE("A support split never makes more pieces than it is allowed", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    AutoSplit::SupportSplitParams params = support_params();
+    params.max_pieces                    = 2;
+
+    const AutoSplit::Plan plan = AutoSplit::plan_to_reduce_supports(shape, params, nullptr, nullptr);
+
+    CHECK(plan.piece_count() <= 2);
+}
+
+TEST_CASE("A support split leaves no piece thinner than the minimum", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    AutoSplit::SupportSplitParams params = support_params();
+    params.min_piece_size                = 15.;
+
+    const AutoSplit::Plan plan = AutoSplit::plan_to_reduce_supports(shape, params, nullptr, nullptr);
+    REQUIRE(!plan.empty());
+
+    // Whichever way the cut runs, it has to sit at least that far from each end of the
+    // model measured along its own normal, or one of the pieces would be a sliver.
+    const Vec3d normal = plan.nodes[0].plane.normal.normalized();
+    double      lowest = std::numeric_limits<double>::max();
+    double      highest = std::numeric_limits<double>::lowest();
+    for (const Vec3f &vertex : shape.vertices) {
+        const double at = normal.dot(vertex.cast<double>());
+        lowest          = std::min(lowest, at);
+        highest         = std::max(highest, at);
+    }
+
+    const double cut_at = normal.dot(plan.nodes[0].plane.origin);
+    CHECK(cut_at > lowest + params.min_piece_size - 1e-6);
+    CHECK(cut_at < highest - params.min_piece_size + 1e-6);
+}
+
+TEST_CASE("A looser threshold angle finds less to support", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    // The smaller the threshold, the steeper an overhang may be before it needs support.
+    const double strict = AutoSplit::overhanging_area(shape, Vec3d::UnitZ(), 60.);
+    const double loose  = AutoSplit::overhanging_area(shape, Vec3d::UnitZ(), 10.);
+
+    CHECK(loose <= strict);
+}
+
+TEST_CASE("Executing a support split stands each piece the way the plan asks", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "tee";
+    object->add_volume(TriangleMesh(shape));
+    object->add_instance();
+
+    const AutoSplit::Plan plan = AutoSplit::plan_to_reduce_supports(shape, support_params(), nullptr, nullptr);
+    REQUIRE(plan.piece_count() == 2);
+
+    AutoSplit::ExecuteParams execute_params;
+    execute_params.connectors.enabled = false;
+
+    Model            pieces;
+    AutoSplit::Error error = AutoSplit::Error::CutFailed;
+    REQUIRE(AutoSplit::execute(plan, *object, 0, execute_params, pieces, &error));
+    CHECK(error == AutoSplit::Error::None);
+    REQUIRE(pieces.objects.size() == 2);
+
+    for (const ModelObject *piece : pieces.objects) {
+        CHECK(!piece->volumes.empty());
+        // Whatever way up a piece ended, it is standing on the bed, not floating.
+        CHECK_THAT(piece->instance_bounding_box(0).min.z(), WithinAbs(0., 0.5));
+    }
+}
+
+TEST_CASE("Leaving the pieces as they stand is possible when asked for", "[AutoSplit]")
+{
+    const indexed_triangle_set shape = tee();
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->add_volume(TriangleMesh(shape));
+    object->add_instance();
+
+    const AutoSplit::Plan plan = AutoSplit::plan_to_reduce_supports(shape, support_params(), nullptr, nullptr);
+    REQUIRE(!plan.empty());
+
+    AutoSplit::ExecuteParams execute_params;
+    execute_params.connectors.enabled           = false;
+    execute_params.apply_piece_build_direction = false;
+
+    Model pieces;
+    REQUIRE(AutoSplit::execute(plan, *object, 0, execute_params, pieces, nullptr));
+
+    for (const ModelObject *piece : pieces.objects)
+        for (const ModelInstance *instance : piece->instances)
+            CHECK_THAT(instance->get_rotation().norm(), WithinAbs(0., 1e-9));
 }

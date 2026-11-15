@@ -7735,6 +7735,8 @@ struct Plater::priv
     bool can_auto_split_to_fit_plate() const;
     void auto_split_by_color();
     bool can_auto_split_by_color() const;
+    void auto_split_to_reduce_supports();
+    bool can_auto_split_to_reduce_supports() const;
     bool can_split_to_objects() const;
     bool can_split_to_volumes() const;
     bool can_arrange() const;
@@ -11490,6 +11492,84 @@ void Plater::priv::auto_split_by_color()
     }
 
     q->arrange();
+}
+
+void Plater::priv::auto_split_to_reduce_supports()
+{
+    const int obj_idx = get_selected_object_idx();
+    if (obj_idx < 0 || obj_idx >= int(model.objects.size()))
+        return;
+
+    ModelObject *object       = model.objects[obj_idx];
+    int          instance_idx = get_selection().get_instance_idx();
+    if (instance_idx < 0 || instance_idx >= int(object->instances.size()))
+        instance_idx = 0;
+
+    AutoSplit::SupportSplitParams params;
+    params.directions = AutoSplit::default_split_directions();
+    // Follow the print's own idea of what needs support.
+    const DynamicPrintConfig &print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    if (const ConfigOptionInt *threshold = print_config.option<ConfigOptionInt>("support_threshold_angle");
+        threshold != nullptr && threshold->value > 0)
+        params.threshold_angle = double(threshold->value);
+
+    wxBusyCursor wait;
+
+    AutoSplit::SupportSplitReport report;
+    AutoSplit::Error              error = AutoSplit::Error::None;
+    const AutoSplit::Plan         plan =
+        AutoSplit::plan_to_reduce_supports(AutoSplit::cut_space_mesh(*object, instance_idx), params, &report, &error);
+    if (error != AutoSplit::Error::None) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                into_u8(auto_split_error_text(error)));
+        return;
+    }
+    if (plan.empty()) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::RegularNotificationLevel,
+                                                _u8L("No cut would reduce this object's overhangs enough to be "
+                                                     "worth making, so it was left whole."));
+        return;
+    }
+
+    AutoSplit::ExecuteParams execute_params;
+    execute_params.connectors = params.connectors;
+
+    Model pieces;
+    if (!AutoSplit::execute(plan, *object, instance_idx, execute_params, pieces, &error)) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                into_u8(auto_split_error_text(error)));
+        return;
+    }
+
+    {
+        Plater::TakeSnapshot snapshot(q, _u8L("Split to Reduce Supports"));
+
+        remove(obj_idx);
+        const std::vector<size_t> idxs = load_model_objects(pieces.objects, false, true, false /*auto_drop*/);
+        q->get_view3D_canvas3D()->update_instance_printable_state_for_objects(idxs);
+
+        get_selection().clear();
+        for (const size_t idx : idxs)
+            get_selection().add_object(unsigned(idx), false);
+    }
+
+    // Say what it bought, since the whole point is a number that got smaller.
+    notification_manager->push_notification(NotificationType::CustomNotification,
+                                            NotificationManager::NotificationLevel::RegularNotificationLevel,
+                                            into_u8(format(_L("Overhanging area went from %1% mm2 to %2% mm2 "
+                                                              "across %3% pieces."),
+                                                           int(report.overhang_before), int(report.overhang_after),
+                                                           int(plan.piece_count()))));
+
+    q->arrange();
+}
+
+bool Plater::priv::can_auto_split_to_reduce_supports() const
+{
+    return can_auto_split_to_fit_plate();
 }
 
 bool Plater::priv::can_auto_split_by_color() const
@@ -23013,6 +23093,7 @@ void Plater::split_object(bool auto_drop)   { p->split_object(auto_drop); }
 void Plater::split_volume()                 { p->split_volume(); }
 void Plater::auto_split_to_fit_plate()      { p->auto_split_to_fit_plate(); }
 void Plater::auto_split_by_color()          { p->auto_split_by_color(); }
+void Plater::auto_split_to_reduce_supports() { p->auto_split_to_reduce_supports(); }
 void Plater::optimize_rotation()
 {
     auto &w = get_ui_job_worker();
@@ -24605,6 +24686,7 @@ bool Plater::can_split_to_objects() const { return p->can_split_to_objects(); }
 bool Plater::can_split_to_volumes() const { return p->can_split_to_volumes(); }
 bool Plater::can_auto_split_to_fit_plate() const { return p->can_auto_split_to_fit_plate(); }
 bool Plater::can_auto_split_by_color() const { return p->can_auto_split_by_color(); }
+bool Plater::can_auto_split_to_reduce_supports() const { return p->can_auto_split_to_reduce_supports(); }
 bool Plater::can_arrange() const { return p->can_arrange(); }
 bool Plater::can_layers_editing() const { return p->can_layers_editing(); }
 bool Plater::can_paste_from_clipboard() const

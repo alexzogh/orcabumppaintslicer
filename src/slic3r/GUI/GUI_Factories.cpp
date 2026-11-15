@@ -1430,6 +1430,10 @@ wxMenu* MenuFactory::append_menu_item_modify(wxMenu* menu, bool multi_selection,
         _L("Cut the selected object into pieces that each print in one filament, joined by connectors"),
         [](wxCommandEvent&) { plater()->auto_split_by_color(); }, "", menu,
         []() { return plater()->can_auto_split_by_color(); }, m_parent);
+    append_menu_item(sub_menu, wxID_ANY, _L("Split to Reduce Supports"),
+        _L("Cut the selected object where its pieces need less support than the whole does, joined by connectors"),
+        [](wxCommandEvent&) { plater()->auto_split_to_reduce_supports(); }, "", menu,
+        []() { return plater()->can_auto_split_to_reduce_supports(); }, m_parent);
 
     if(mesh_boolean){
         if(sub_menu->GetMenuItemCount() > 0)

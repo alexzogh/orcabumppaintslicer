@@ -85,6 +85,10 @@ struct Piece
     // The filament this piece should print in, 1-based, or 0 to leave it as it is. Set by
     // a strategy that knows what a piece is for, such as splitting by painted colour.
     int extruder{0};
+    // The direction of the piece that should end up pointing up the printer's Z, in cut
+    // space. +Z leaves the piece standing as it was. Set by a strategy that gains from
+    // turning a piece over, such as splitting to reduce supports.
+    Vec3d build_direction{Vec3d::UnitZ()};
 };
 
 // Which node of the tree splits one side of a cut, or which piece that side already is.
@@ -224,6 +228,70 @@ Plan plan_by_painted_color(const ModelObject   &object,
                            const ColorSplitParams &params,
                            Error               *error = nullptr);
 
+// Splitting to reduce supports
+// ----------------------------
+//
+// A part prints without support when every downward-facing surface is steep enough that
+// the layer below reaches it: a shape with a flat base that rises without overhangs, which
+// the literature calls pyramidal. Cutting a model into pyramidal parts is the exact version
+// of this problem, and it is NP-hard; the published approximate method (Hu, Li, Zhang and
+// Cohen-Or, "Approximate pyramidal shape decomposition", SIGGRAPH Asia 2014) recasts it as
+// an exact-cover problem over clustered building blocks and solves that globally.
+//
+// This is not that, and does not claim to be. It is a greedy planar heuristic: try planes,
+// keep the one whose two pieces — each free to be stood on whichever face suits it — leave
+// the least overhanging area, and stop when no plane helps enough. It reduces overhang area
+// and reports by how much. It does not promise support-free parts, the fewest parts, or the
+// best cut.
+//
+// Cutting only helps because a piece can then be turned over: a cut makes a new flat face
+// to stand the piece on, and the overhang that needed support is often above it. So each
+// piece carries the direction it should be printed in, and the planner scores a cut by what
+// the pieces cost once they are turned.
+
+struct SupportSplitParams
+{
+    // Plane directions to try. Empty means default_split_directions().
+    std::vector<Vec3d> directions;
+    // Positions tried along each direction.
+    int position_samples{64};
+    // Surfaces whose slope is below this need support, matching the print setting of the
+    // same name. Degrees from horizontal: 0 is a ceiling, 90 is a wall.
+    double threshold_angle{30.};
+    // Make a cut only when it removes at least this fraction of the overhanging area. A
+    // cut that barely helps is not worth gluing afterwards.
+    double min_improvement{0.15};
+    // Never cut a piece down below this, in mm, along the direction of the cut.
+    double min_piece_size{10.};
+
+    int max_pieces{8};
+
+    ConnectorParams connectors;
+};
+
+// What the split achieved, in square mm of overhanging surface.
+struct SupportSplitReport
+{
+    // Printing the model as it stands, upright.
+    double overhang_before{0.};
+    // Summed over the pieces, each printed in the direction the plan gives it.
+    double overhang_after{0.};
+};
+
+// The area of `its` that would need support if it were printed with `build_direction`
+// pointing up. `threshold_angle` is in degrees, as the print setting is.
+double overhanging_area(const indexed_triangle_set &its, const Vec3d &build_direction, double threshold_angle);
+
+// Choose planes that leave the pieces with less overhanging surface than the whole model
+// has, and record in Plan::pieces which way up each piece should print.
+//
+// `its` must already be in cut space. Returns an empty plan when no cut helps enough, which
+// is not a failure: the model is better printed whole.
+Plan plan_to_reduce_supports(const indexed_triangle_set &its,
+                             const SupportSplitParams   &params,
+                             SupportSplitReport         *report = nullptr,
+                             Error                      *error  = nullptr);
+
 // Executing a plan
 // ----------------
 
@@ -234,6 +302,10 @@ struct ExecuteParams
     bool number_pieces{true};
     // Apply Piece::extruder to the pieces that carry one.
     bool apply_piece_extruder{true};
+    // Stand each piece the way the plan asks: turn it so its Piece::build_direction points
+    // up, and set it down on the bed. Turn this off to keep every piece where it was
+    // inside the original object, which is what lines the pieces up for assembly.
+    bool apply_piece_build_direction{true};
     // Drop the multi-material paint from a piece that was given a filament of its own, so
     // it prints in that one filament instead of in the colours it was painted.
     bool clear_paint_on_coloured_pieces{true};

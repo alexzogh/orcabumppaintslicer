@@ -825,6 +825,9 @@ public:
     // Cut the selected object into pieces that each print in one filament.
     void auto_split_by_color();
     bool can_auto_split_by_color() const;
+    // Cut the selected object into pieces that need less support than the whole does.
+    void auto_split_to_reduce_supports();
+    bool can_auto_split_to_reduce_supports() const;
     bool can_split(bool to_objects) const;
 #if ENABLE_ENHANCED_PRINT_VOLUME_FIT
     bool can_scale_to_print_volume() const;
