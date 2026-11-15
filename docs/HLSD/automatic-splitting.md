@@ -7,7 +7,7 @@ plane by hand in the Cut tool. There are three reasons in place:
 
 - *Split to Fit the Plate* — the object is larger than the printer, and the pieces have to be small enough to
   print.
-- *Split by Painted Colour* — the object is painted for several filaments, and each piece should print in one of
+- *Split by Painted Color* — the object is painted for several filaments, and each piece should print in one of
   them and be assembled afterwards.
 - *Split to Reduce Supports* — the object overhangs itself, and cutting it lets the pieces stand on faces that
   print without support.
