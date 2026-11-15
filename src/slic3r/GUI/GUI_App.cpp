@@ -6,6 +6,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Platform.hpp"
 #include "GUI_App.hpp"
+#include "slic3r/GUI/MCP/McpService.hpp"
 #include "BBLTopbar.hpp"
 #include "Shortcuts.hpp"
 #include "DeviceCore/DevConfigUtil.h"
@@ -1231,6 +1232,10 @@ void GUI_App::post_init()
     }
     if (m_startup_cloud_report)
         std::exchange(m_startup_cloud_report, nullptr)();
+
+    // Serve the MCP interface, when the environment asks for it. Last in post_init so the tools
+    // find a main frame and a plater already standing.
+    mcp::start_if_requested();
 
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
 //BBS: remove the single instance currently

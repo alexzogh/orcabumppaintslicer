@@ -283,6 +283,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp
     GUI/HttpServer.hpp
+    GUI/MCP/MainThreadDispatcher.cpp
+    GUI/MCP/MainThreadDispatcher.hpp
+    GUI/MCP/McpProtocol.cpp
+    GUI/MCP/McpProtocol.hpp
+    GUI/MCP/McpListener.cpp
+    GUI/MCP/McpListener.hpp
+    GUI/MCP/McpService.cpp
+    GUI/MCP/McpService.hpp
     GUI/I18N.cpp
     GUI/I18N.hpp
     GUI/DragDropPanel.cpp
