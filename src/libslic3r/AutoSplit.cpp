@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include <Eigen/Geometry>
 #include <admesh/stl.h>
 #include <boost/log/trivial.hpp>
 
