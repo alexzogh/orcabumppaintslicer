@@ -302,6 +302,12 @@ struct CutConnectorAttributes
     CutConnectorAttributes(const CutConnectorAttributes& rhs) :
         CutConnectorAttributes(rhs.type, rhs.style, rhs.shape) {}
 
+    // Declaring the copy constructor above suppresses the implicit copy assignment operator
+    // under -Wdeprecated-copy-with-user-provided-copy, which the Windows clang-cl build turns
+    // into an error through -Werror. Nothing here needs behaviour other than the member-wise
+    // copy, so say so explicitly rather than leaving the deprecated implicit one to be used.
+    CutConnectorAttributes& operator=(const CutConnectorAttributes& rhs) = default;
+
     bool operator==(const CutConnectorAttributes& other) const;
 
     bool operator!=(const CutConnectorAttributes& other) const { return !(other == (*this)); }
