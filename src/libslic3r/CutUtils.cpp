@@ -24,6 +24,28 @@
 
 namespace Slic3r {
 
+indexed_triangle_set make_cut_connector_mesh(CutConnectorAttributes attributes,
+                                             float                  snap_space_proportion,
+                                             float                  snap_bulge_proportion)
+{
+    int sectorCount = 1;
+    switch (CutConnectorShape(attributes.shape)) {
+    case CutConnectorShape::Triangle: sectorCount = 3; break;
+    case CutConnectorShape::Square:   sectorCount = 4; break;
+    case CutConnectorShape::Circle:   sectorCount = 360; break;
+    case CutConnectorShape::Hexagon:  sectorCount = 6; break;
+    default: break;
+    }
+
+    if (attributes.type == CutConnectorType::Snap)
+        return its_make_snap(1.0, 1.0, snap_space_proportion, snap_bulge_proportion);
+    if (attributes.style == CutConnectorStyle::Prism)
+        return its_make_cylinder(1.0, 1.0, (2 * PI / sectorCount));
+    if (attributes.type == CutConnectorType::Plug)
+        return its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
+    return its_make_frustum_dowel(1.0, 1.0, sectorCount);
+}
+
 using namespace Geometry;
 
 static void apply_tolerance(ModelVolume* vol)

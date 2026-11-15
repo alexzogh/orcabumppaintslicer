@@ -4103,36 +4103,7 @@ void GLGizmoCut3D::data_changed(bool is_serializing)
 
 indexed_triangle_set GLGizmoCut3D::get_connector_mesh(CutConnectorAttributes connector_attributes)
 {
-    indexed_triangle_set connector_mesh;
-
-    int   sectorCount{ 1 };
-    switch (CutConnectorShape(connector_attributes.shape)) {
-    case CutConnectorShape::Triangle:
-        sectorCount = 3;
-        break;
-    case CutConnectorShape::Square:
-        sectorCount = 4;
-        break;
-    case CutConnectorShape::Circle:
-        sectorCount = 360;
-        break;
-    case CutConnectorShape::Hexagon:
-        sectorCount = 6;
-        break;
-    default:
-        break;
-    }
-
-    if (connector_attributes.type == CutConnectorType::Snap)
-        connector_mesh = its_make_snap(1.0, 1.0, m_snap_space_proportion, m_snap_bulge_proportion);
-    else if (connector_attributes.style == CutConnectorStyle::Prism)
-        connector_mesh = its_make_cylinder(1.0, 1.0, (2 * PI / sectorCount));
-    else if (connector_attributes.type == CutConnectorType::Plug)
-        connector_mesh = its_make_frustum(1.0, 1.0, (2 * PI / sectorCount));
-    else
-        connector_mesh = its_make_frustum_dowel(1.0, 1.0, sectorCount);
-
-    return connector_mesh;
+    return make_cut_connector_mesh(connector_attributes, m_snap_space_proportion, m_snap_bulge_proportion);
 }
 
 void GLGizmoCut3D::apply_cut_connectors(ModelObject* mo, const std::string& connector_name)
