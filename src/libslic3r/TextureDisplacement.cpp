@@ -43,6 +43,7 @@
 #include "PNGReadWrite.hpp"
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
+#include "TextureOutlineWrap.hpp"
 #include "TextureBake/TextureBakeDisplace.hpp"
 #include "TriangleSelector.hpp"
 #include "TextureBake/TextureBakeDebug.hpp"
@@ -2123,6 +2124,141 @@ std::vector<Vec2f> collapse_corner_uvs(const indexed_triangle_set &patch, const 
     return per_vertex;
 }
 
+namespace {
+
+// FNV-1a over the mesh's geometry, exactly as unwrap_cache_key() hashes a patch. The outline depends
+// on nothing else about the volume - not on the layer, the texture or any of its sliders - so keying
+// on this is what lets Tile size be dragged without re-slicing the part on every frame.
+uint64_t outline_wrap_cache_key(const indexed_triangle_set &mesh)
+{
+    uint64_t   h   = 1469598103934665603ull;
+    const auto mix = [&h](const void *data, size_t bytes) {
+        const unsigned char *p = static_cast<const unsigned char *>(data);
+        for (size_t i = 0; i < bytes; ++i) {
+            h ^= p[i];
+            h *= 1099511628211ull;
+        }
+    };
+    mix(mesh.vertices.data(), mesh.vertices.size() * sizeof(Vec3f));
+    mix(mesh.indices.data(), mesh.indices.size() * sizeof(stl_triangle_vertex_indices));
+    return h;
+}
+
+struct OutlineWrapCache
+{
+    std::mutex                                                       mutex;
+    std::unordered_map<uint64_t, std::shared_ptr<const OutlineWrap>> entries;
+};
+OutlineWrapCache g_outline_wrap_cache;
+const size_t     OUTLINE_WRAP_CACHE_MAX_ENTRIES = 4;
+
+std::shared_ptr<const OutlineWrap> cached_outline_wrap(const indexed_triangle_set &mesh)
+{
+    if (mesh.indices.empty())
+        return nullptr;
+    const uint64_t key = outline_wrap_cache_key(mesh);
+    {
+        std::lock_guard<std::mutex> lock(g_outline_wrap_cache.mutex);
+        if (auto it = g_outline_wrap_cache.entries.find(key); it != g_outline_wrap_cache.entries.end())
+            return it->second;
+    }
+    auto wrap = std::make_shared<const OutlineWrap>(build_outline_wrap(mesh));
+    {
+        std::lock_guard<std::mutex> lock(g_outline_wrap_cache.mutex);
+        if (g_outline_wrap_cache.entries.size() >= OUTLINE_WRAP_CACHE_MAX_ENTRIES)
+            g_outline_wrap_cache.entries.clear();
+        g_outline_wrap_cache.entries.emplace(key, wrap);
+    }
+    return wrap;
+}
+
+// The millimetre length u advances over one full loop of the outline: the whole number of texture
+// repeats nearest to fitting the mean outline, times the tile size. Taking it from the *mean* outline
+// and then using that same number at every height is what makes the wrap close at the seam all the
+// way up a part whose cross-section changes - the repeats stay whole, they just stretch a little.
+float outline_wrap_loop_mm(const OutlineWrap &wrap, const TextureDisplacementLayer &layer)
+{
+    const float tile = (layer.tiling_scale > 1e-6f) ? layer.tiling_scale : 1.f;
+    return std::max(1.f, std::round(wrap.mean_length / tile)) * tile;
+}
+
+// One point's millimetre coordinate: along the outline and up. Where the outline cannot be followed
+// this is Cylindrical about the very same axis, so the band that falls back keeps the seam, the
+// direction and the origin of the band that wraps. project_cylindrical() measures its angle from +Y
+// and so reads zero a half turn past the seam, where the wrap reads half a loop; adding half a loop
+// lines the two up. They still part company away from the seam - that is the difference between
+// measuring along the outline and measuring by angle, which is the whole point of this mapping - but
+// the fallback is the neighbouring mapping rather than an arbitrary offset into the texture.
+Vec2f outline_wrap_planar(const OutlineWrap &wrap, float loop_mm, const Vec3f &position)
+{
+    float share = 0.f, rise = 0.f;
+    if (outline_wrap_place(wrap, position, share, rise))
+        return Vec2f(share * loop_mm, -rise * loop_mm);
+    const Vec3f axis_point(wrap.axis_xy.x(), wrap.axis_xy.y(), wrap.min_z);
+    return project_cylindrical(position, axis_point, Vec3f::UnitZ()) + Vec2f(0.5f * loop_mm, 0.f);
+}
+
+} // namespace
+
+std::vector<Vec2f> compute_outline_wrap_corner_uvs(const indexed_triangle_set     &mesh,
+                                                   const indexed_triangle_set     &patch,
+                                                   const TextureDisplacementLayer &layer)
+{
+    if (patch.indices.empty())
+        return {};
+    const std::shared_ptr<const OutlineWrap> wrap = cached_outline_wrap(mesh);
+    if (wrap == nullptr || !wrap->usable())
+        return {};
+
+    const float        loop = outline_wrap_loop_mm(*wrap, layer);
+    std::vector<Vec2f> corner(patch.indices.size() * 3, Vec2f::Zero());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, patch.indices.size()),
+                      [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t j = range.begin(); j < range.end(); ++j) {
+            const stl_triangle_vertex_indices &tri = patch.indices[j];
+            Vec2f                              p[3];
+            for (int k = 0; k < 3; ++k) {
+                const int vi = tri[k];
+                p[k] = (vi >= 0 && size_t(vi) < patch.vertices.size()) ?
+                           outline_wrap_planar(*wrap, loop, patch.vertices[size_t(vi)]) :
+                           Vec2f::Zero();
+            }
+            // A triangle straddling the seam has one corner just before the end of the loop and the
+            // others just after its start, so its three us span almost the whole part the wrong way
+            // round. Shifting the other two by whole loops onto the first corner's side makes it
+            // interpolate across the seam instead - and because a loop is a whole number of repeats,
+            // the texture still lines up there.
+            for (int k = 1; k < 3; ++k) {
+                const float d = std::round((p[k].x() - p[0].x()) / loop);
+                p[k].x() -= d * loop;
+            }
+            for (int k = 0; k < 3; ++k)
+                corner[j * 3 + size_t(k)] = p[k];
+        }
+    });
+    return corner;
+}
+
+std::vector<Vec2f> compute_outline_wrap_uvs(const indexed_triangle_set     &mesh,
+                                            const indexed_triangle_set     &patch,
+                                            const TextureDisplacementLayer &layer)
+{
+    if (patch.vertices.empty())
+        return {};
+    const std::shared_ptr<const OutlineWrap> wrap = cached_outline_wrap(mesh);
+    if (wrap == nullptr || !wrap->usable())
+        return {};
+
+    const float        loop = outline_wrap_loop_mm(*wrap, layer);
+    std::vector<Vec2f> uv(patch.vertices.size(), Vec2f::Zero());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, patch.vertices.size()),
+                      [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t vi = range.begin(); vi < range.end(); ++vi)
+            uv[vi] = outline_wrap_planar(*wrap, loop, patch.vertices[vi]);
+    });
+    return uv;
+}
+
 std::vector<Vec2f> transfer_uv_channel(const indexed_triangle_set &src_mesh,
                                        const std::vector<Vec2f>   &src_uv,
                                        const indexed_triangle_set &dst_mesh,
@@ -2301,6 +2437,10 @@ float sample_layer_height(const DecodedHeightTexture &texture, const TextureDisp
         return sample_at(*lscm_uv);
 
     switch (layer.projection_method) {
+    // An OutlineWrap layer normally arrives here with its uv already computed above, so reaching the
+    // switch at all means the part has no outline to follow - its documented fallback (see the
+    // header) is Cylindrical, the same way a patch that will not flatten falls back to Triplanar.
+    case TextureProjectionMethod::OutlineWrap:
     case TextureProjectionMethod::Cylindrical:
         return sample_at(project_cylindrical(position, patch_center, patch_axis));
     case TextureProjectionMethod::Spherical:
@@ -2385,6 +2525,8 @@ bool sample_layer_color(const DecodedHeightTexture &texture, const TextureDispla
     }
 
     switch (layer.projection_method) {
+    // No outline to follow - see sample_layer_height().
+    case TextureProjectionMethod::OutlineWrap:
     case TextureProjectionMethod::Cylindrical: {
         const Vec2f p = project_cylindrical(position, patch_center, patch_axis);
         if (!covered(p))
@@ -3238,9 +3380,16 @@ static indexed_triangle_set build_texture_displacement_in_place(
         const std::vector<Vec2f> model_corner_uvs = model_uv_layer ?
                                                         compute_model_corner_uvs(mesh, *model_uv, patch, patch_source) :
                                                         std::vector<Vec2f>{};
+        // OutlineWrap is a per-point formula like Cylindrical, but one that needs the whole part's
+        // silhouette rather than just a centre and an axis, so it is evaluated here with the rest of
+        // the precomputed placements instead of inside sample_layer_height(). The outline comes from
+        // the volume's own mesh, not from `patch`: the pattern must not move when more of the part is
+        // painted.
         const std::vector<Vec2f> patch_uvs = model_uv_layer ? collapse_corner_uvs(patch, model_corner_uvs) :
                                              (layer->projection_method == TextureProjectionMethod::LSCM) ?
                                                  compute_lscm_uvs(patch, *layer) :
+                                             (layer->projection_method == TextureProjectionMethod::OutlineWrap) ?
+                                                 compute_outline_wrap_uvs(mesh, patch, *layer) :
                                                  std::vector<Vec2f>{};
         // The colour pass below samples per *triangle*, so it takes the per-corner unwrap instead: the
         // per-vertex collapse above would hand a triangle at a seam the island layout did not join its
@@ -3249,6 +3398,8 @@ static indexed_triangle_set build_texture_displacement_in_place(
         const std::vector<Vec2f> patch_corner_uvs = model_uv_layer ? model_corner_uvs :
                                                     (layer->projection_method == TextureProjectionMethod::LSCM) ?
                                                         compute_lscm_corner_uvs(patch, *layer) :
+                                                    (layer->projection_method == TextureProjectionMethod::OutlineWrap) ?
+                                                        compute_outline_wrap_corner_uvs(mesh, patch, *layer) :
                                                         std::vector<Vec2f>{};
         const bool               corner_uv_ok     = !patch_corner_uvs.empty() &&
                                                     patch_corner_uvs.size() == patch.indices.size() * 3;
@@ -3806,15 +3957,22 @@ std::shared_ptr<std::vector<PreparedLayer>> prepare_sampleable_layers(
         texture_displacement_patch_frame(patch, vertex_normals, centroid, axis, average_normal);
 
         std::shared_ptr<const LscmLookup> lscm;
-        if (model_uv_layer || layer->projection_method == TextureProjectionMethod::LSCM) {
+        if (model_uv_layer || layer->projection_method == TextureProjectionMethod::LSCM ||
+            layer->projection_method == TextureProjectionMethod::OutlineWrap) {
             // Solved on the very patch the classic path and the GUI solve it on (same geometry, seam
             // angle and edges), so it hits the unwrap cache and lands exactly where the UV editor
             // shows it, hand-placed islands and UV edits included. A ModelUV layer needs no solve at
             // all - its corners are read straight out of the volume's channel - but it is looked up
             // through the same per-triangle machinery, for the same reason: there is no formula from a
             // point to its uv.
+            // OutlineWrap is a formula, but one that needs the whole part's silhouette, so like the
+            // two above it is evaluated once per patch corner rather than per sample. An empty result
+            // means the part has no outline to follow, and the layer drops through to the analytic
+            // sampling below, which falls back to Cylindrical for it.
             auto l    = std::make_shared<LscmLookup>();
             l->corner = model_uv_layer ? compute_model_corner_uvs(base_mesh, *model_uv, patch, patch_source) :
+                        (layer->projection_method == TextureProjectionMethod::OutlineWrap) ?
+                                          compute_outline_wrap_corner_uvs(base_mesh, patch, *layer) :
                                           compute_lscm_corner_uvs(patch, *layer);
             if (l->corner.size() == patch.indices.size() * 3) {
                 l->patch = patch;
@@ -5926,7 +6084,13 @@ bool texture_displacement_layers_from_json(const std::string                    
                 read_enum(j, "projection_method", projection);
                 read_enum(j, "blend_mode", blend);
                 l.tile_method       = TextureTileMethod(tile_method);
-                l.projection_method = TextureProjectionMethod(std::clamp(projection, 0, 4));
+                // An unknown method - a project saved by a newer build - reads back as the default
+                // rather than as whichever enumerator the number happens to land on. The range has to
+                // cover every TextureProjectionMethod: clamping it short silently rewrote the last
+                // ones into a different mapping on load.
+                l.projection_method = (projection >= 0 && projection <= int(TextureProjectionMethod::OutlineWrap)) ?
+                                          TextureProjectionMethod(projection) :
+                                          TextureProjectionMethod::Triplanar;
                 l.blend_mode        = TextureBlendMode(blend);
 
                 read(j, "lscm_seam_angle_deg", l.lscm_seam_angle_deg);

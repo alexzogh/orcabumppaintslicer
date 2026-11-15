@@ -1378,6 +1378,18 @@ std::vector<Vec2f> GLGizmoTextureDisplacement::compute_layer_vertex_uvs(const in
             p = apply_uv_transform(p, layer, aspect);
         return uv;
     }
+    if (layer.projection_method == TextureProjectionMethod::OutlineWrap) {
+        // The outline is the whole part's silhouette, so it is taken from the volume's own mesh in
+        // the same world frame the patch is projected in - exactly what the bake slices. Like the
+        // unwrap's, the result is in millimetres and the layer's tiling/rotation/offset go on top.
+        const ModelVolume *mv = texture_volume();
+        if (mv == nullptr)
+            return {};
+        std::vector<Vec2f> uv = compute_outline_wrap_uvs(patch_in_world(mv->mesh().its), patch, layer);
+        for (Vec2f &p : uv)
+            p = apply_uv_transform(p, layer, aspect);
+        return uv;
+    }
     if (layer.projection_method == TextureProjectionMethod::ViewProjected) {
         std::vector<Vec2f> uv(patch.vertices.size());
         for (size_t vi = 0; vi < patch.vertices.size(); ++vi) {
@@ -1406,8 +1418,12 @@ int GLGizmoTextureDisplacement::layer_projection_frame(const indexed_triangle_se
     center = Vec3f::Zero();
     axis   = Vec3f::UnitZ();
     const ModelVolume *mv = texture_volume();
+    // OutlineWrap is here only for the case where it has no outline to follow and compute_layer_*_uvs()
+    // handed back nothing: the bake falls back to Cylindrical for it, so the shader must too, or the
+    // preview would show a triplanar projection of a layer that will bake as a cylindrical one.
     if (mv == nullptr || (layer.projection_method != TextureProjectionMethod::Cylindrical &&
-                          layer.projection_method != TextureProjectionMethod::Spherical))
+                          layer.projection_method != TextureProjectionMethod::Spherical &&
+                          layer.projection_method != TextureProjectionMethod::OutlineWrap))
         return 0;
     // The bake averages the *whole mesh's* vertex normals over the patch's corners, so this has to as
     // well: a patch-only average would sometimes quantize to a different world axis and wrap the
@@ -1417,7 +1433,7 @@ int GLGizmoTextureDisplacement::layer_projection_frame(const indexed_triangle_se
     texture_displacement_patch_frame(patch_in_world(local_patch),
                                      texture_displacement_vertex_normals(patch_in_world(mv->mesh().its)),
                                      center, axis, average_normal);
-    return layer.projection_method == TextureProjectionMethod::Cylindrical ? 1 : 2;
+    return layer.projection_method == TextureProjectionMethod::Spherical ? 2 : 1;
 }
 
 std::vector<Vec2f> GLGizmoTextureDisplacement::compute_layer_corner_uvs(const indexed_triangle_set     &local_patch,
@@ -1430,6 +1446,21 @@ std::vector<Vec2f> GLGizmoTextureDisplacement::compute_layer_corner_uvs(const in
         const indexed_triangle_set patch  = patch_in_world(local_patch);
         const float                aspect = layer_texture_aspect(layer);
         std::vector<Vec2f>         uv     = compute_lscm_corner_uvs(patch, layer);
+        for (Vec2f &p : uv)
+            p = apply_uv_transform(p, layer, aspect);
+        return uv;
+    }
+    if (layer.projection_method == TextureProjectionMethod::OutlineWrap) {
+        // Per corner rather than fanned out from the per-vertex result below: this is where a
+        // triangle straddling the seam is brought onto one side of it, so the preview interpolates
+        // across the seam the way the bake's colour pass does instead of running the whole texture
+        // backwards through that one triangle.
+        const ModelVolume *mv = texture_volume();
+        if (mv == nullptr)
+            return {};
+        const indexed_triangle_set patch  = patch_in_world(local_patch);
+        const float                aspect = layer_texture_aspect(layer);
+        std::vector<Vec2f>         uv     = compute_outline_wrap_corner_uvs(patch_in_world(mv->mesh().its), patch, layer);
         for (Vec2f &p : uv)
             p = apply_uv_transform(p, layer, aspect);
         return uv;
@@ -4032,6 +4063,7 @@ void GLGizmoTextureDisplacement::ensure_panel_icons()
         "texture_displacement_add.svg", "texture_displacement_add_negative.svg", "circle_paint.svg",
         "menu_obj_sphere.svg", "menu_obj_cube.svg", "menu_obj_cylinder.svg", "texture_displacement_map_unwrap.svg",
         "texture_displacement_map_view.svg", "texture_displacement_map_model_uv.svg",
+        "texture_displacement_map_outline.svg",
         "texture_displacement_tile_repeat.svg", "menu_mirror_x.svg",
         "texture_displacement_adjust.svg", "canvas_drag.svg", "texture_displacement_move_up.svg",
         "texture_displacement_move_down.svg", "texture_displacement_drag.svg",
@@ -7979,6 +8011,13 @@ void GLGizmoTextureDisplacement::on_render_input_window(float x, float y, float 
                           _L("Model UV - uses the texture coordinates the model itself came with, so a texture made for "
                              "that model lands exactly where it was painted. Nothing is unwrapped, and Tile size does "
                              "not apply: the model's own layout is the placement."),
+                          nullptr },
+                        { "texture_displacement_map_outline.svg", _L("Outline wrap"),
+                          _L("Outline wrap - runs the texture along the part's own outline around Z, so a regular "
+                             "pattern keeps its cell size on flat faces and around corners instead of stretching and "
+                             "bunching the way Cylindrical does. A whole number of repeats is fitted to the outline, "
+                             "so the wrap closes with no seam - unless it is rotated by something other than a "
+                             "quarter turn."),
                           nullptr },
                     };
                     // Only a volume that actually carries a UV channel can be mapped by it. Shown
