@@ -11366,7 +11366,7 @@ static wxString auto_split_error_text(AutoSplit::Error error)
     case AutoSplit::Error::TooManyPieces:
         return _L("Fitting this object on the plate would need too many pieces.");
     case AutoSplit::Error::NothingToSeparate:
-        return _L("This object is painted in a single colour, so there is nothing to separate.");
+        return _L("This object is painted in a single color, so there is nothing to separate.");
     case AutoSplit::Error::NoSuchInstance:
     case AutoSplit::Error::CutFailed:
     case AutoSplit::Error::MalformedPlan:
@@ -11463,7 +11463,7 @@ void Plater::priv::auto_split_by_color()
     if (plan.empty()) {
         notification_manager->push_notification(NotificationType::CustomNotification,
                                                 NotificationManager::NotificationLevel::RegularNotificationLevel,
-                                                _u8L("The painted colours on this object cannot be separated by a "
+                                                _u8L("The painted colors on this object cannot be separated by a "
                                                      "flat cut, so it was left whole."));
         return;
     }
@@ -11480,7 +11480,7 @@ void Plater::priv::auto_split_by_color()
     }
 
     {
-        Plater::TakeSnapshot snapshot(q, _u8L("Split by Painted Colour"));
+        Plater::TakeSnapshot snapshot(q, _u8L("Split by Painted Color"));
 
         remove(obj_idx);
         const std::vector<size_t> idxs = load_model_objects(pieces.objects, false, true);
