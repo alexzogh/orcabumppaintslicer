@@ -1426,7 +1426,7 @@ wxMenu* MenuFactory::append_menu_item_modify(wxMenu* menu, bool multi_selection,
         _L("Cut the selected object into pieces that each fit on the build plate, joined by connectors"),
         [](wxCommandEvent&) { plater()->auto_split_to_fit_plate(); }, "", menu,
         []() { return plater()->can_auto_split_to_fit_plate(); }, m_parent);
-    append_menu_item(sub_menu, wxID_ANY, _L("Split by Painted Colour"),
+    append_menu_item(sub_menu, wxID_ANY, _L("Split by Painted Color"),
         _L("Cut the selected object into pieces that each print in one filament, joined by connectors"),
         [](wxCommandEvent&) { plater()->auto_split_by_color(); }, "", menu,
         []() { return plater()->can_auto_split_by_color(); }, m_parent);
