@@ -7733,6 +7733,8 @@ struct Plater::priv
     bool can_decrease_instances() const;
     void auto_split_to_fit_plate();
     bool can_auto_split_to_fit_plate() const;
+    void auto_split_by_color();
+    bool can_auto_split_by_color() const;
     bool can_split_to_objects() const;
     bool can_split_to_volumes() const;
     bool can_arrange() const;
@@ -11361,6 +11363,8 @@ static wxString auto_split_error_text(AutoSplit::Error error)
         return _L("Fitting this object on the plate would need pieces too thin to print.");
     case AutoSplit::Error::TooManyPieces:
         return _L("Fitting this object on the plate would need too many pieces.");
+    case AutoSplit::Error::NothingToSeparate:
+        return _L("This object is painted in a single colour, so there is nothing to separate.");
     case AutoSplit::Error::NoSuchInstance:
     case AutoSplit::Error::CutFailed:
     case AutoSplit::Error::MalformedPlan:
@@ -11428,6 +11432,77 @@ void Plater::priv::auto_split_to_fit_plate()
 
     // The pieces come out stacked where the object stood, so lay them out on the plate.
     q->arrange();
+}
+
+void Plater::priv::auto_split_by_color()
+{
+    const int obj_idx = get_selected_object_idx();
+    if (obj_idx < 0 || obj_idx >= int(model.objects.size()))
+        return;
+
+    ModelObject *object       = model.objects[obj_idx];
+    int          instance_idx = get_selection().get_instance_idx();
+    if (instance_idx < 0 || instance_idx >= int(object->instances.size()))
+        instance_idx = 0;
+
+    AutoSplit::ColorSplitParams params;
+    params.directions = AutoSplit::default_split_directions();
+
+    wxBusyCursor wait;
+
+    AutoSplit::Error      error = AutoSplit::Error::None;
+    const AutoSplit::Plan plan  = AutoSplit::plan_by_painted_color(*object, instance_idx, params, &error);
+    if (error != AutoSplit::Error::None) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                into_u8(auto_split_error_text(error)));
+        return;
+    }
+    if (plan.empty()) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::RegularNotificationLevel,
+                                                _u8L("The painted colours on this object cannot be separated by a "
+                                                     "flat cut, so it was left whole."));
+        return;
+    }
+
+    AutoSplit::ExecuteParams execute_params;
+    execute_params.connectors = params.connectors;
+
+    Model pieces;
+    if (!AutoSplit::execute(plan, *object, instance_idx, execute_params, pieces, &error)) {
+        notification_manager->push_notification(NotificationType::CustomNotification,
+                                                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                into_u8(auto_split_error_text(error)));
+        return;
+    }
+
+    {
+        Plater::TakeSnapshot snapshot(q, _u8L("Split by Painted Colour"));
+
+        remove(obj_idx);
+        const std::vector<size_t> idxs = load_model_objects(pieces.objects, false, true);
+        q->get_view3D_canvas3D()->update_instance_printable_state_for_objects(idxs);
+
+        get_selection().clear();
+        for (const size_t idx : idxs)
+            get_selection().add_object(unsigned(idx), false);
+    }
+
+    q->arrange();
+}
+
+bool Plater::priv::can_auto_split_by_color() const
+{
+    if (!can_auto_split_to_fit_plate())
+        return false;
+
+    // Only worth offering on a model that carries multi-material paint to separate.
+    const ModelObject *object = model.objects[get_selected_object_idx()];
+    for (const ModelVolume *volume : object->volumes)
+        if (volume->is_model_part() && !volume->mmu_segmentation_facets.empty())
+            return true;
+    return false;
 }
 
 bool Plater::priv::can_auto_split_to_fit_plate() const
@@ -22937,6 +23012,7 @@ void Plater::mirror(Axis axis)              { p->mirror(axis); }
 void Plater::split_object(bool auto_drop)   { p->split_object(auto_drop); }
 void Plater::split_volume()                 { p->split_volume(); }
 void Plater::auto_split_to_fit_plate()      { p->auto_split_to_fit_plate(); }
+void Plater::auto_split_by_color()          { p->auto_split_by_color(); }
 void Plater::optimize_rotation()
 {
     auto &w = get_ui_job_worker();
@@ -24528,6 +24604,7 @@ bool Plater::can_smooth_mesh() const { return p->can_smooth_mesh(); }
 bool Plater::can_split_to_objects() const { return p->can_split_to_objects(); }
 bool Plater::can_split_to_volumes() const { return p->can_split_to_volumes(); }
 bool Plater::can_auto_split_to_fit_plate() const { return p->can_auto_split_to_fit_plate(); }
+bool Plater::can_auto_split_by_color() const { return p->can_auto_split_by_color(); }
 bool Plater::can_arrange() const { return p->can_arrange(); }
 bool Plater::can_layers_editing() const { return p->can_layers_editing(); }
 bool Plater::can_paste_from_clipboard() const

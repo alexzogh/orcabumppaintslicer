@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,9 +14,11 @@
 #include "libslic3r/AutoSplit.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/BuildVolume.hpp"
+#include "libslic3r/Config.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/libslic3r.h"
 #include "test_utils.hpp"
 
@@ -104,6 +107,87 @@ ModelObject *add_box_object(Model &model, double x, double y, double z)
     object->add_volume(std::move(mesh));
     object->add_instance();
     return object;
+}
+
+// Paints every facet lying wholly on the object's low-X face with `paint`. On a plain box
+// that is the end cap, so the model carries two colours separated by a plane.
+void paint_low_x_face(ModelVolume *volume, EnforcerBlockerType paint)
+{
+    const indexed_triangle_set &its   = volume->mesh().its;
+    float                       min_x = std::numeric_limits<float>::max();
+    for (const Vec3f &vertex : its.vertices)
+        min_x = std::min(min_x, vertex.x());
+
+    TriangleSelector selector(volume->mesh());
+    int              painted = 0;
+    for (size_t i = 0; i < its.indices.size(); ++i) {
+        const Vec3i32 &facet = its.indices[i];
+        const bool     on_face = its.vertices[facet(0)].x() < min_x + 0.01f &&
+                             its.vertices[facet(1)].x() < min_x + 0.01f &&
+                             its.vertices[facet(2)].x() < min_x + 0.01f;
+        if (on_face) {
+            selector.set_facet(int(i), paint);
+            ++painted;
+        }
+    }
+    REQUIRE(painted > 0);
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+}
+
+ModelObject *add_two_colour_box(Model &model, double x = 100., double y = 40., double z = 40.)
+{
+    ModelObject *object = add_box_object(model, x, y, z);
+    paint_low_x_face(object->volumes.front(), EnforcerBlockerType::Extruder2);
+    return object;
+}
+
+// Both end caps painted and the sides left bare, so the second colour sits at each end of
+// the model with the first between them. One plane cannot separate those.
+ModelObject *add_box_painted_at_both_ends(Model &model, double x = 100., double y = 40., double z = 40.)
+{
+    ModelObject                *object = add_box_object(model, x, y, z);
+    const indexed_triangle_set &its    = object->volumes.front()->mesh().its;
+
+    float min_x = std::numeric_limits<float>::max();
+    float max_x = std::numeric_limits<float>::lowest();
+    for (const Vec3f &vertex : its.vertices) {
+        min_x = std::min(min_x, vertex.x());
+        max_x = std::max(max_x, vertex.x());
+    }
+
+    TriangleSelector selector(object->volumes.front()->mesh());
+    int              painted = 0;
+    for (size_t i = 0; i < its.indices.size(); ++i) {
+        const Vec3i32 &facet = its.indices[i];
+        const auto     at    = [&](float plane) {
+            return std::abs(its.vertices[facet(0)].x() - plane) < 0.01f &&
+                   std::abs(its.vertices[facet(1)].x() - plane) < 0.01f &&
+                   std::abs(its.vertices[facet(2)].x() - plane) < 0.01f;
+        };
+        if (at(min_x) || at(max_x)) {
+            selector.set_facet(int(i), EnforcerBlockerType::Extruder2);
+            ++painted;
+        }
+    }
+    REQUIRE(painted > 0);
+    REQUIRE(object->volumes.front()->mmu_segmentation_facets.set(selector));
+    return object;
+}
+
+AutoSplit::ColorSplitParams colour_params()
+{
+    AutoSplit::ColorSplitParams params;
+    params.connectors.enabled = false;
+    return params;
+}
+
+std::vector<int> piece_extruders(const AutoSplit::Plan &plan)
+{
+    std::vector<int> extruders;
+    for (const AutoSplit::Piece &piece : plan.pieces)
+        extruders.push_back(piece.extruder);
+    std::sort(extruders.begin(), extruders.end());
+    return extruders;
 }
 
 } // namespace
@@ -508,4 +592,285 @@ TEST_CASE("Planning works on the cut-space mesh of a rotated instance", "[AutoSp
 
     REQUIRE(plan.nodes.size() == 1);
     CHECK(axis_of(plan.nodes[0].plane.normal) == Y);
+}
+
+// Splitting by painted colour
+// ---------------------------
+
+TEST_CASE("A plan numbers its pieces so every branch names one", "[AutoSplit]")
+{
+    const indexed_triangle_set box = centred_box(640., 450., 90.);
+
+    const AutoSplit::Plan plan = AutoSplit::plan_fit_build_plate(box, plate(200., 200., 250.));
+
+    REQUIRE(!plan.empty());
+    // A binary tree with n internal nodes has n + 1 leaves.
+    CHECK(plan.pieces.size() == plan.nodes.size() + 1);
+
+    std::vector<bool> named(plan.pieces.size(), false);
+    for (const AutoSplit::PlanNode &node : plan.nodes)
+        for (const int branch : {node.upper, node.lower})
+            if (AutoSplit::branch_is_piece(branch)) {
+                const int piece = AutoSplit::branch_to_piece(branch);
+                REQUIRE(piece >= 0);
+                REQUIRE(size_t(piece) < named.size());
+                CHECK(!named[size_t(piece)]); // no piece is claimed twice
+                named[size_t(piece)] = true;
+            }
+    for (const bool claimed : named)
+        CHECK(claimed);
+}
+
+TEST_CASE("An unpainted model has no colours to separate", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_box_object(model, 100., 40., 40.);
+
+    AutoSplit::Error      error = AutoSplit::Error::None;
+    const AutoSplit::Plan plan  = AutoSplit::plan_by_painted_color(*object, 0, colour_params(), &error);
+
+    CHECK(plan.empty());
+    CHECK(error == AutoSplit::Error::NothingToSeparate);
+}
+
+TEST_CASE("A model painted in a single colour has no colours to separate", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_box_object(model, 100., 40., 40.);
+
+    // Every facet the same colour is still one colour, however much paint there is.
+    TriangleSelector selector(object->volumes.front()->mesh());
+    for (size_t i = 0; i < object->volumes.front()->mesh().its.indices.size(); ++i)
+        selector.set_facet(int(i), EnforcerBlockerType::Extruder2);
+    REQUIRE(object->volumes.front()->mmu_segmentation_facets.set(selector));
+
+    AutoSplit::Error      error = AutoSplit::Error::None;
+    const AutoSplit::Plan plan  = AutoSplit::plan_by_painted_color(*object, 0, colour_params(), &error);
+
+    CHECK(plan.empty());
+    CHECK(error == AutoSplit::Error::NothingToSeparate);
+}
+
+TEST_CASE("A two-colour model is cut into one piece per colour", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    AutoSplit::Error      error = AutoSplit::Error::None;
+    const AutoSplit::Plan plan  = AutoSplit::plan_by_painted_color(*object, 0, colour_params(), &error);
+
+    REQUIRE(error == AutoSplit::Error::None);
+    REQUIRE(plan.nodes.size() == 1);
+    CHECK(plan.piece_count() == 2);
+
+    // The paint is on the low-X cap, so the cut has to run across X.
+    CHECK(axis_of(plan.nodes[0].plane.normal) == X);
+
+    // One piece prints in the painted filament, the other in the volume's own.
+    CHECK(piece_extruders(plan) == std::vector<int>{1, 2});
+}
+
+TEST_CASE("A speck of a second colour is not worth cutting the model for", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    // The painted cap is a twelfth of the surface; told to ignore anything under half, the
+    // planner should treat it as a stray dab rather than a colour worth separating.
+    AutoSplit::ColorSplitParams params = colour_params();
+    params.ignore_colour_fraction      = 0.5;
+
+    AutoSplit::Error      error = AutoSplit::Error::None;
+    const AutoSplit::Plan plan  = AutoSplit::plan_by_painted_color(*object, 0, params, &error);
+
+    CHECK(plan.empty());
+    CHECK(error == AutoSplit::Error::NothingToSeparate);
+}
+
+TEST_CASE("A colour at both ends of a model takes a cut at each end", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_box_painted_at_both_ends(model);
+
+    const AutoSplit::Plan plan = AutoSplit::plan_by_painted_color(*object, 0, colour_params(), nullptr);
+
+    // No single plane separates the two painted ends from the bare middle, but two do.
+    REQUIRE(plan.nodes.size() == 2);
+    CHECK(plan.piece_count() == 3);
+    CHECK(piece_extruders(plan) == std::vector<int>{1, 2, 2});
+}
+
+TEST_CASE("A cut that would leave too much paint on the wrong piece is not made", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_box_painted_at_both_ends(model);
+
+    // The best plane here still strands one painted cap, a twelfth of the painted area, on
+    // the wrong side. Told not to tolerate that much, the planner leaves the model whole
+    // rather than cutting somewhere that does not separate the colours.
+    AutoSplit::ColorSplitParams params = colour_params();
+    params.hopeless_fraction           = 0.05;
+
+    AutoSplit::Error      error = AutoSplit::Error::None;
+    const AutoSplit::Plan plan  = AutoSplit::plan_by_painted_color(*object, 0, params, &error);
+
+    CHECK(plan.empty());
+    CHECK(error == AutoSplit::Error::None); // not a failure: there is simply nothing worth doing
+}
+
+TEST_CASE("A colour split stops once every piece is one colour", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    // The cap separates cleanly, so one cut leaves two single-coloured pieces and the
+    // planner has no reason to cut either of them again.
+    const AutoSplit::Plan plan = AutoSplit::plan_by_painted_color(*object, 0, colour_params(), nullptr);
+
+    REQUIRE(!plan.empty());
+    CHECK(plan.nodes.size() == 1);
+}
+
+TEST_CASE("A colour split never makes more pieces than it is allowed", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    AutoSplit::ColorSplitParams params = colour_params();
+    params.max_pieces                  = 1;
+
+    const AutoSplit::Plan plan = AutoSplit::plan_by_painted_color(*object, 0, params, nullptr);
+
+    CHECK(plan.piece_count() <= 1);
+}
+
+TEST_CASE("Executing a colour split gives each piece its own filament", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    const AutoSplit::Plan plan = AutoSplit::plan_by_painted_color(*object, 0, colour_params(), nullptr);
+    REQUIRE(plan.piece_count() == 2);
+
+    AutoSplit::ExecuteParams execute_params;
+    execute_params.connectors.enabled = false;
+
+    Model            pieces;
+    AutoSplit::Error error = AutoSplit::Error::CutFailed;
+    REQUIRE(AutoSplit::execute(plan, *object, 0, execute_params, pieces, &error));
+    CHECK(error == AutoSplit::Error::None);
+    REQUIRE(pieces.objects.size() == 2);
+
+    // execute() returns the pieces in Plan::pieces order, so the two line up.
+    for (size_t i = 0; i < pieces.objects.size(); ++i) {
+        const ConfigOption *extruder = pieces.objects[i]->config.option("extruder");
+        REQUIRE(extruder != nullptr);
+        CHECK(extruder->getInt() == plan.pieces[i].extruder);
+    }
+}
+
+TEST_CASE("A piece given its own filament no longer carries the paint it was split on", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    const AutoSplit::Plan plan = AutoSplit::plan_by_painted_color(*object, 0, colour_params(), nullptr);
+    REQUIRE(!plan.empty());
+
+    AutoSplit::ExecuteParams execute_params;
+    execute_params.connectors.enabled = false;
+
+    Model pieces;
+    REQUIRE(AutoSplit::execute(plan, *object, 0, execute_params, pieces, nullptr));
+
+    // Each piece prints in one filament now, so leaving the paint on would reinstate the
+    // colours the split was asked to separate.
+    for (const ModelObject *piece : pieces.objects)
+        for (const ModelVolume *volume : piece->volumes)
+            CHECK(volume->mmu_segmentation_facets.empty());
+}
+
+TEST_CASE("Keeping the paint on a colour split is possible when asked for", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    const AutoSplit::Plan plan = AutoSplit::plan_by_painted_color(*object, 0, colour_params(), nullptr);
+    REQUIRE(!plan.empty());
+
+    AutoSplit::ExecuteParams execute_params;
+    execute_params.connectors.enabled             = false;
+    execute_params.clear_paint_on_coloured_pieces = false;
+
+    Model pieces;
+    REQUIRE(AutoSplit::execute(plan, *object, 0, execute_params, pieces, nullptr));
+
+    size_t painted = 0;
+    for (const ModelObject *piece : pieces.objects)
+        for (const ModelVolume *volume : piece->volumes)
+            if (!volume->mmu_segmentation_facets.empty())
+                ++painted;
+    CHECK(painted > 0);
+}
+
+TEST_CASE("The painted surface reports area and filament per facet", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model, 100., 40., 40.);
+
+    const std::vector<AutoSplit::PaintedFacet> facets = AutoSplit::painted_surface(*object, 0);
+    REQUIRE(!facets.empty());
+
+    double painted_area = 0.;
+    double total_area   = 0.;
+    for (const AutoSplit::PaintedFacet &facet : facets) {
+        CHECK(facet.area > 0.);
+        CHECK(facet.extruder >= 1);
+        total_area += facet.area;
+        if (facet.extruder == 2)
+            painted_area += facet.area;
+    }
+
+    // The painted cap is one 40 x 40 face; the whole box is 2 * (100*40 + 40*40 + 100*40).
+    CHECK_THAT(painted_area, WithinAbs(1600., 1.));
+    CHECK_THAT(total_area, WithinAbs(2. * (100. * 40. + 40. * 40. + 100. * 40.), 1.));
+}
+
+TEST_CASE("A colour cut gets connectors like any other cut", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    AutoSplit::ColorSplitParams params = colour_params();
+    params.connectors.enabled          = true;
+
+    const AutoSplit::Plan plan = AutoSplit::plan_by_painted_color(*object, 0, params, nullptr);
+    REQUIRE(plan.nodes.size() == 1);
+    CHECK(!plan.nodes[0].connectors.empty());
+}
+
+TEST_CASE("The default split directions are distinct unit vectors", "[AutoSplit]")
+{
+    const std::vector<Vec3d> directions = AutoSplit::default_split_directions();
+
+    REQUIRE(directions.size() >= 3);
+    for (const Vec3d &direction : directions)
+        CHECK_THAT(direction.norm(), WithinAbs(1., 1e-9));
+
+    // A direction and its opposite describe the same plane, so neither may appear twice.
+    for (size_t i = 0; i < directions.size(); ++i)
+        for (size_t j = i + 1; j < directions.size(); ++j)
+            CHECK(std::abs(directions[i].dot(directions[j])) < 1. - 1e-9);
+}
+
+TEST_CASE("Splitting by colour against a missing instance fails rather than cutting", "[AutoSplit]")
+{
+    Model        model;
+    ModelObject *object = add_two_colour_box(model);
+
+    AutoSplit::Error      error = AutoSplit::Error::None;
+    const AutoSplit::Plan plan  = AutoSplit::plan_by_painted_color(*object, 7, colour_params(), &error);
+
+    CHECK(plan.empty());
+    CHECK(error == AutoSplit::Error::NoSuchInstance);
 }

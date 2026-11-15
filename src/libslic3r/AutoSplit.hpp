@@ -52,6 +52,8 @@ enum class Error
     PiecesTooThin,
     // Fitting the model would need more pieces than FitPlateParams::max_pieces.
     TooManyPieces,
+    // Splitting by colour was asked for, but the model is painted in one colour or none.
+    NothingToSeparate,
     // A cut did not produce the two halves it should have.
     CutFailed,
     // The plan is inconsistent, which is a bug rather than something the user can fix.
@@ -77,24 +79,38 @@ struct Connector
     double height{5.};
 };
 
-// A node of the binary cut tree. `upper` and `lower` index back into Plan::nodes and say
-// which node splits that side further; -1 means that side is a finished piece.
+// A finished piece of the model: one leaf of the cut tree.
+struct Piece
+{
+    // The filament this piece should print in, 1-based, or 0 to leave it as it is. Set by
+    // a strategy that knows what a piece is for, such as splitting by painted colour.
+    int extruder{0};
+};
+
+// Which node of the tree splits one side of a cut, or which piece that side already is.
+// Non-negative is an index into Plan::nodes; negative encodes an index into Plan::pieces.
+inline bool branch_is_piece(int branch) { return branch < 0; }
+inline int  branch_to_piece(int branch) { return -branch - 1; }
+inline int  piece_to_branch(int piece) { return -piece - 1; }
+
+// A node of the binary cut tree. `upper` and `lower` are branches, as above.
 struct PlanNode
 {
     CutPlane               plane;
     std::vector<Connector> connectors;
-    int                    upper{-1};
-    int                    lower{-1};
+    int                    upper{piece_to_branch(0)};
+    int                    lower{piece_to_branch(0)};
 };
 
 // A cut plan. nodes[0] is the root. An empty plan means the model needs no cutting.
 struct Plan
 {
     std::vector<PlanNode> nodes;
+    std::vector<Piece>    pieces;
 
-    bool   empty() const { return nodes.empty(); }
+    bool empty() const { return nodes.empty(); }
     // A binary tree with n internal nodes has n + 1 leaves, and every leaf is one piece.
-    size_t piece_count() const { return nodes.size() + 1; }
+    size_t piece_count() const { return nodes.empty() ? 1 : pieces.size(); }
 };
 
 struct ConnectorParams
@@ -135,6 +151,79 @@ Vec3d usable_size(const BuildVolume &build_volume, double clearance);
 // empty plan with Error::None means "nothing to do".
 Plan plan_fit_build_plate(const indexed_triangle_set &its, const FitPlateParams &params, Error *error = nullptr);
 
+// Splitting by painted colour
+// ---------------------------
+//
+// Multi-material paint is a property of the *surface*: mmu_segmentation_facets says which
+// filament each facet prints in, and says nothing about the material behind it. A piece,
+// on the other hand, is a volume. Something has to decide which filament the inside of the
+// model belongs to, and the rule here is:
+//
+//   A plane decides the volume. Each piece takes all the material on its side of the
+//   separating planes, and its filament is the one most of the paint it carries asks for.
+//   The planes are chosen to leave as little painted area as possible on the wrong piece.
+//
+// The alternative — giving each point of the interior the colour of the nearest painted
+// facet, and splitting along the resulting boundary — fits the paint exactly and produces
+// parts nobody can use. Those boundaries are curved and re-entrant, so the parts interlock
+// and cannot be pulled apart in any direction, cannot be joined by the cut connectors that
+// already exist, and are usually worse to print than the model was whole. Separating the
+// filaments is only worth anything if the pieces go back together, so the rule trades
+// exactness at a colour boundary for parts that assemble, and reports how much paint ended
+// up on the wrong piece so the choice can be judged.
+//
+// Where the paint cannot be separated by planes at all — a logo on a flat face, say — the
+// planner says so instead of returning a split that does not mean anything.
+
+// One facet of the painted surface. Area-weighted, because the triangle selector subdivides
+// a partly painted facet and the pieces are nothing like the same size.
+struct PaintedFacet
+{
+    Vec3d  centre{Vec3d::Zero()};
+    double area{0.};
+    // 1-based filament, as EnforcerBlockerType::ExtruderN encodes it. Unpainted facets take
+    // the volume's own filament.
+    int extruder{1};
+};
+
+// The painted surface of `object`'s instance `instance_idx`, in cut space.
+std::vector<PaintedFacet> painted_surface(const ModelObject &object, int instance_idx);
+
+struct ColorSplitParams
+{
+    // Directions to try for each cut. Need not be axis-aligned: the cut machinery takes any
+    // plane. Empty means the three axes.
+    std::vector<Vec3d> directions;
+    // Positions tried along each direction.
+    int position_samples{256};
+    // Ignore a colour covering less than this fraction of a piece's painted area, rather
+    // than cutting the model up over a few stray facets. A piece left with one colour by
+    // this rule is finished.
+    double ignore_colour_fraction{0.005};
+    // Give up on a piece when the best plane still leaves more than this fraction of its
+    // painted area on the wrong side: the colours there are not separable by a plane, and
+    // cutting anyway would make a worse model rather than a more colourful one.
+    double hopeless_fraction{0.45};
+
+    int max_pieces{32};
+
+    ConnectorParams connectors;
+};
+
+// The standard set of directions to try: the three axes, the six face diagonals and the
+// four body diagonals of a cube. Colour boundaries rarely line up with the axes.
+std::vector<Vec3d> default_split_directions();
+
+// Choose the planes that separate the painted colours of `object` into pieces that each
+// print in one filament, and record each piece's filament in Plan::pieces.
+//
+// Returns an empty plan with Error::NothingToSeparate when the model carries fewer than two
+// colours, and an empty plan with Error::None when the colours are already separate.
+Plan plan_by_painted_color(const ModelObject   &object,
+                           int                  instance_idx,
+                           const ColorSplitParams &params,
+                           Error               *error = nullptr);
+
 // Executing a plan
 // ----------------
 
@@ -143,6 +232,11 @@ struct ExecuteParams
     ConnectorParams connectors;
     // Name each piece "<object name> - <n>".
     bool number_pieces{true};
+    // Apply Piece::extruder to the pieces that carry one.
+    bool apply_piece_extruder{true};
+    // Drop the multi-material paint from a piece that was given a filament of its own, so
+    // it prints in that one filament instead of in the colours it was painted.
+    bool clear_paint_on_coloured_pieces{true};
 };
 
 // Apply `plan` to instance `instance_idx` of `object`, appending the resulting pieces to
