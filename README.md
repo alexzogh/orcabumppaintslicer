@@ -27,6 +27,39 @@
 > earns its place along X and Y, and confined to a painted region.
 >
 > Design notes: [`docs/HLSD/paint-color-mixing.md`](docs/HLSD/paint-color-mixing.md).
+>
+> **Wrap a texture along a part's outline.** OrcaSlicer's displacement painting projects a texture
+> cylindrically by measuring across the part as an angle rather than a distance. On anything that is
+> not a round cylinder that stretches the pattern across the flat faces and bunches it at the
+> corners. This adds an *Outline wrap* projection that measures along the part's own silhouette
+> instead, so a regular pattern keeps its cell size all the way round a box and runs unbroken around
+> every corner. Where a cross-section has no outline the axis can see — a C-shaped section whose
+> opening faces it — that band of the part falls back to cylindrical.
+>
+> Design notes: [`docs/HLSD/outline-wrap.md`](docs/HLSD/outline-wrap.md).
+>
+> **Split a model automatically.** Three entries in an object's *Modify* menu, each cutting for a
+> reason you state instead of asking you to place the planes by hand in the Cut tool:
+>
+> - *Split to Fit the Plate* — the object is larger than the printer, and the pieces have to fit.
+> - *Split by Painted Color* — the object is painted for several filaments, and each piece should
+>   print in one of them.
+> - *Split to Reduce Supports* — the object overhangs itself, and cutting it lets the pieces stand
+>   on faces that print without support.
+>
+> All three seat connectors on the cut faces, keep the paint, and arrange the pieces on the plate
+> afterwards. They share one design — a planner that only chooses planes, and one executor that
+> drives OrcaSlicer's own `Cut` — so they differ in nothing but the choice. None of them appears for
+> SLA, or for an object that came out of the Cut tool, and none does anything to an object that has
+> no reason to be split.
+>
+> Design notes: [`docs/HLSD/automatic-splitting.md`](docs/HLSD/automatic-splitting.md).
+>
+> **More displacement textures.** The texture library ships 106 patterns rather than 44. The 62
+> added come from [stlTexturizer](https://github.com/CNCKitchen/stlTexturizer) by CNCKitchen, under
+> the same AGPL-3.0 this repository uses; 29 others in that project are deliberately left out
+> because their license could not be established. See
+> [`resources/textures/displacement/CREDITS.md`](resources/textures/displacement/CREDITS.md).
 
 <div align="center">
 
