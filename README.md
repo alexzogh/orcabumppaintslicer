@@ -60,6 +60,23 @@
 > the same AGPL-3.0 this repository uses; 29 others in that project are deliberately left out
 > because their license could not be established. See
 > [`resources/textures/displacement/CREDITS.md`](resources/textures/displacement/CREDITS.md).
+>
+> **An MCP interface, for driving the slicer from an AI client.** Off unless the `ORCA_MCP`
+> environment variable is set. When it is, the app serves the Model Context Protocol over HTTP on
+> loopback and writes the port and a bearer token to `mcp.json` in its data directory, which is
+> where a client reads them from.
+>
+> Today it exposes a single read-only tool, `list_objects`, which reports the objects on the plate
+> with their ids, names, instance counts and parts. The protocol, the listener and the main-thread
+> dispatcher that lets a tool touch the GUI safely are all in place, so adding a tool is now a
+> matter of writing the tool — but one read tool is what there is so far, and it is worth saying
+> that rather than calling this a way to automate the slicer.
+>
+> It binds `127.0.0.1` on an ephemeral port, refuses a request whose `Origin` is not loopback,
+> compares the bearer token without an early exit, and narrows `mcp.json` to its owner before the
+> token is written into it. On Windows that last step buys nothing — boost maps it onto the
+> read-only attribute rather than an ACL — so there the per-user data directory is the whole of the
+> protection.
 
 <div align="center">
 
