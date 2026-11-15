@@ -383,8 +383,13 @@ jobs:
             retry xcrun stapler staple OrcaSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
           fi
 
+      # The signed step above covers upstream's own main and release branches, the only
+      # place the signing certificate exists. Everywhere else the DMG is built here,
+      # unsigned. This has to be the exact complement of that step's condition: testing
+      # the ref alone left a fork building its own main matching neither step, so no DMG
+      # was created and "Upload artifacts mac" below silently uploaded nothing.
       - name: Create DMG without notary
-        if: github.ref != 'refs/heads/main' && runner.os == 'macOS' && inputs.macos-combine-only
+        if: ${{ !(github.repository == 'OrcaSlicer/OrcaSlicer' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))) && runner.os == 'macOS' && inputs.macos-combine-only }}
         working-directory: ${{ github.workspace }}
         run: |
           # Load the `retry` and `create_dmg` helpers.
