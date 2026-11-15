@@ -148,7 +148,10 @@ if (-not $ClangTidy) {
             & $PyExe @PyArgs -m venv $Venv
             if ($LASTEXITCODE -ne 0) { throw "Could not create a Python virtual environment." }
             & "$Venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
-            & "$Venv\Scripts\python.exe" -m pip install --quiet -r $Requirements
+            # Not --quiet: the wheel is about 27 MB, and without pip's progress a slow
+            # download is indistinguishable from the script having hung.
+            Write-Host "Installing clang-tidy $Pinned into $Venv"
+            & "$Venv\Scripts\python.exe" -m pip install -r $Requirements
             if ($LASTEXITCODE -ne 0) { throw "Installing clang-tidy $Pinned failed." }
         } else {
             Write-Host "To install it yourself, run:"

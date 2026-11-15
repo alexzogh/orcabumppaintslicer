@@ -178,7 +178,10 @@ if [ -z "$CLANG_TIDY" ]; then
                 exit 1
             fi
             "$VENV/bin/pip" install --quiet --upgrade pip
-            "$VENV/bin/pip" install --quiet -r "$REQUIREMENTS"
+            # Not --quiet: the wheel is about 27 MB, and without pip's progress a slow
+            # download is indistinguishable from the script having hung.
+            echo "Installing clang-tidy $PINNED into $VENV"
+            "$VENV/bin/pip" install -r "$REQUIREMENTS"
         else
             echo "To install it yourself, run:" >&2
             echo "    python3 -m venv $VENV && $VENV/bin/pip install -r scripts/clang_tidy_requirements.txt" >&2
