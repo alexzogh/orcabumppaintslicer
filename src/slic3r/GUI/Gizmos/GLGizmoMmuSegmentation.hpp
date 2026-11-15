@@ -10,6 +10,7 @@
 #include <string>
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Color.hpp"
+#include "libslic3r/ColorDecomposeRecipe.hpp"
 #include <wx/string.h>
 #include <wx/gdicmn.h>
 #include <set>
@@ -167,6 +168,43 @@ private:
     // Filament remapping methods
     void remap_filament_assignments();
     void render_filament_remap_ui(float window_width, float max_tooltip_width, float scale);
+
+    // Free-colour painting: solve an arbitrary colour into a mix of the loaded filaments, and paint
+    // with the mixed filament slot that realises it. The solve itself is
+    // libslic3r/ColorDecomposeRecipe.hpp, the same one the sidebar's decompose dialog uses.
+    void render_color_mix_ui(float max_tooltip_width);
+    // The physical filaments the project has loaded, in the form the recipe solver takes, together
+    // with the material type a mix should prefer. A mixed slot interleaves physical filaments and so
+    // cannot be a component of another one, which is why only the physical ones are offered.
+    void physical_filaments(std::vector<ColorDecomposePhysicalFilament> &palette, std::string &preferred_type) const;
+    // The filament slot that prints `wanted`, reusing a slot that already mixes to it and creating
+    // one when none does. -1 when the project has no room for another slot.
+    int slot_for_color(const ColorRGB &wanted);
+    // Ramps `steps` colours from `from` to `to` across the region painted with the selected
+    // filament - or across the whole object, when nothing is painted with it - along a world axis.
+    // Returns how many triangles it painted, or -1 when it could not run.
+    int apply_color_gradient(const ColorRGB &from, const ColorRGB &to, int steps, int axis);
+
+    // What the colour section is set to. Deliberately not persisted: it is the state of an open
+    // panel rather than a property of the model, and what it produces is an ordinary filament slot.
+    float m_mix_wanted[3]    = {0.5f, 0.5f, 0.5f};
+    float m_gradient_from[3] = {1.0f, 1.0f, 1.0f};
+    float m_gradient_to[3]   = {0.0f, 0.0f, 0.0f};
+    int   m_gradient_steps   = 5;
+    int   m_gradient_axis    = 2; // world Z, so a gradient runs up the print unless told otherwise
+
+    // What the last solve produced for each of the section's three colour pickers. The panel
+    // redraws every frame while it is open, so without this the solver would run three times a
+    // frame on colours that have not moved. init_extruders_data() drops it when the loaded
+    // filaments change underneath it, since the same colour then resolves differently.
+    struct ColorPreview
+    {
+        bool     valid     = false;
+        float    wanted[3] = {0.0f, 0.0f, 0.0f};
+        ColorRGB printed;
+        bool     reachable = true;
+    };
+    ColorPreview m_color_preview[3];
     // ORCA: Helper to update the cache of used filaments
     void update_used_filaments();
 
