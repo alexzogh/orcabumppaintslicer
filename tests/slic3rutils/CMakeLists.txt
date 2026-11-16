@@ -31,6 +31,7 @@ add_executable(${_TEST_NAME}_tests
     # The MCP server pieces that need neither a socket nor an event loop to exercise.
     test_main_thread_dispatcher.cpp
     test_mcp_protocol.cpp
+    test_mcp_selectors.cpp
     test_prebuild_queue.cpp
     test_staged_build.cpp
     test_network_versions.cpp

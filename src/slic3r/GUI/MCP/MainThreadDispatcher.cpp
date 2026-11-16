@@ -1,6 +1,7 @@
 #include "MainThreadDispatcher.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <utility>
 
 namespace Slic3r { namespace GUI {
@@ -49,19 +50,34 @@ MainThreadDispatcher::Status MainThreadDispatcher::call(std::function<void()> fn
             call->started = true;
         }
 
-        fn();
+        // Nothing may escape from here: this runs inside the wx event loop, which has no handler
+        // and would terminate the application. Whatever fn() threw travels back to the waiter.
+        std::exception_ptr thrown;
+        try {
+            fn();
+        } catch (...) {
+            thrown = std::current_exception();
+        }
 
         {
             std::lock_guard<std::mutex> lock(call->mutex);
-            call->done = true;
+            call->error = thrown;
+            call->done  = true;
         }
         call->cv.notify_all();
     });
 
     std::unique_lock<std::mutex> lock(call->mutex);
     if (call->cv.wait_for(lock, timeout, [&call] { return call->done || call->abandoned; })) {
-        if (call->done)
+        if (call->done) {
+            // Rethrown here, on the caller's thread, where there is something to catch it.
+            if (call->error) {
+                std::exception_ptr error = call->error;
+                lock.unlock();
+                std::rethrow_exception(error);
+            }
             return Status::Ok;
+        }
         // Woken by shutdown() rather than by the work finishing.
         return call->started ? Status::TimedOutMaybeRan : Status::ShuttingDown;
     }

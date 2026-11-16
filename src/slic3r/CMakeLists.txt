@@ -283,8 +283,20 @@ set(SLIC3R_GUI_SOURCES
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp
     GUI/HttpServer.hpp
+    GUI/ColorSlot.cpp
+    GUI/ColorSlot.hpp
     GUI/MCP/MainThreadDispatcher.cpp
     GUI/MCP/MainThreadDispatcher.hpp
+    GUI/MCP/McpTools.cpp
+    GUI/MCP/McpToolsProject.cpp
+    GUI/MCP/McpToolsPaint.cpp
+    GUI/MCP/McpToolsConfig.cpp
+    GUI/MCP/McpToolsTexture.cpp
+    GUI/MCP/McpToolsApp.cpp
+    GUI/MCP/McpToolsOutput.cpp
+    GUI/MCP/McpTools.hpp
+    GUI/MCP/McpSelectors.cpp
+    GUI/MCP/McpSelectors.hpp
     GUI/MCP/McpProtocol.cpp
     GUI/MCP/McpProtocol.hpp
     GUI/MCP/McpListener.cpp

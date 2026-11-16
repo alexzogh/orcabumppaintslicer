@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -65,6 +66,11 @@ public:
 
     // Runs `fn` on the main thread and waits up to `timeout` for it to finish.
     //
+    // An exception thrown by `fn` is carried back and rethrown on the calling thread. That is
+    // not a convenience: `fn` runs inside the wx event loop, where an escaping exception
+    // terminates the application. Tools are written to throw on failure, so the dispatcher has to
+    // be the thing that stops those throws reaching the loop.
+    //
     // `fn` writes its result wherever the caller wants it; this returns only whether it ran. That
     // keeps the dispatcher free of any opinion about what a tool call returns, and the
     // happens-before edge the waiter needs is supplied by the same mutex that publishes `done`, so a
@@ -86,6 +92,8 @@ private:
         bool                    started   = false;
         bool                    done      = false;
         bool                    abandoned = false;
+        // What `fn` threw, if anything, to be rethrown on the waiting thread.
+        std::exception_ptr      error;
     };
 
     Poster       m_poster;

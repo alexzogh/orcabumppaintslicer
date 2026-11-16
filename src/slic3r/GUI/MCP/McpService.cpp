@@ -20,6 +20,7 @@
 #include "MainThreadDispatcher.hpp"
 #include "McpListener.hpp"
 #include "McpProtocol.hpp"
+#include "McpTools.hpp"
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Utils.hpp"
@@ -54,55 +55,24 @@ std::string describe(MainThreadDispatcher::Status status)
     return {};
 }
 
-// Runs `fn` on the GUI thread and turns anything other than success into a ToolError, so each tool
-// body can read as if it were simply running there.
-void on_gui_thread(MainThreadDispatcher &dispatcher, const std::function<void()> &fn)
-{
-    const MainThreadDispatcher::Status status = dispatcher.call(fn, tool_timeout);
-    if (status != MainThreadDispatcher::Status::Ok)
-        throw ToolError(describe(status));
-}
-
 Registry build_registry(MainThreadDispatcher &dispatcher)
 {
-    Registry registry;
-
-    Tool list_objects;
-    list_objects.name        = "list_objects";
-    list_objects.description = "Lists the objects on the current plate, with their ids, names, instance counts "
-                               "and the volumes (parts) each is made of. Object ids are stable; use them rather "
-                               "than positions, which shift when an object is removed.";
-    list_objects.input_schema = json{{"type", "object"}, {"properties", json::object()}};
-    list_objects.run          = [&dispatcher](const json &) -> json {
-        json        objects = json::array();
-        std::string failure;
-
-        on_gui_thread(dispatcher, [&objects, &failure] {
-            Plater *plater = wxGetApp().plater();
-            if (plater == nullptr) {
-                failure = "No plater is open.";
-                return;
-            }
-            for (const ModelObject *object : plater->model().objects) {
-                if (object == nullptr)
-                    continue;
-                json volumes = json::array();
-                for (const ModelVolume *volume : object->volumes)
-                    if (volume != nullptr)
-                        volumes.push_back(json{{"id", volume->id().id}, {"name", volume->name}});
-                objects.push_back(json{{"id", object->id().id},
-                                       {"name", object->name},
-                                       {"instances", object->instances.size()},
-                                       {"volumes", std::move(volumes)}});
-            }
-        });
-
-        if (!failure.empty())
-            throw ToolError(failure);
-        return json{{"objects", std::move(objects)}};
+    // Each tool group registers itself. The dispatcher is reached through a plain callable so a
+    // group needs to know nothing about wxWidgets, or about which thread it is being called on.
+    ToolContext context;
+    context.on_gui = [&dispatcher](const std::function<void()> &fn) {
+        const MainThreadDispatcher::Status status = dispatcher.call(fn, tool_timeout);
+        if (status != MainThreadDispatcher::Status::Ok)
+            throw ToolError(describe(status));
     };
-    registry.add(std::move(list_objects));
 
+    Registry registry;
+    add_project_tools(registry, context);
+    add_paint_tools(registry, context);
+    add_config_tools(registry, context);
+    add_texture_tools(registry, context);
+    add_output_tools(registry, context);
+    add_app_tools(registry, context);
     return registry;
 }
 

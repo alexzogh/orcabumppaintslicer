@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <stdexcept>
 #include <chrono>
 #include <cstddef>
 #include <deque>
@@ -258,6 +259,39 @@ TEST_CASE("destroying the dispatcher releases a call that is still waiting", "[M
 
     CHECK(released.load());
     CHECK(waited < 30s);
+}
+
+TEST_CASE("an exception thrown by the work reaches the caller", "[MainThreadDispatcher]")
+{
+    // Not a convenience. The work runs inside the event loop, which has no handler, so an
+    // exception that escaped there would terminate the application rather than fail one call.
+    Loop                 loop;
+    Pump                 pump(loop);
+    MainThreadDispatcher dispatcher(poster(loop), [] { return false; });
+
+    CHECK_THROWS_AS(dispatcher.call([] { throw std::runtime_error("from the main thread"); }, 10s),
+                    std::runtime_error);
+
+    // The exception travelled rather than being swallowed: its message survives the trip.
+    try {
+        dispatcher.call([] { throw std::runtime_error("the original message"); }, 10s);
+        FAIL("the exception did not reach the caller");
+    } catch (const std::runtime_error &e) {
+        CHECK(std::string(e.what()) == "the original message");
+    }
+
+    // And the dispatcher still works afterwards: a failed call is one failed call.
+    int result = 0;
+    CHECK(dispatcher.call([&result] { result = 7; }, 10s) == MainThreadDispatcher::Status::Ok);
+    CHECK(result == 7);
+}
+
+TEST_CASE("an exception from a call made on the main thread reaches the caller too", "[MainThreadDispatcher]")
+{
+    Loop                 loop;
+    MainThreadDispatcher dispatcher(poster(loop), [] { return true; });
+
+    CHECK_THROWS_AS(dispatcher.call([] { throw std::runtime_error("inline"); }, 10s), std::runtime_error);
 }
 
 TEST_CASE("a call with nothing to run succeeds without reaching the event loop", "[MainThreadDispatcher]")
