@@ -66,11 +66,26 @@
 > loopback and writes the port and a bearer token to `mcp.json` in its data directory, which is
 > where a client reads them from.
 >
-> Today it exposes a single read-only tool, `list_objects`, which reports the objects on the plate
-> with their ids, names, instance counts and parts. The protocol, the listener and the main-thread
-> dispatcher that lets a tool touch the GUI safely are all in place, so adding a tool is now a
-> matter of writing the tool — but one read tool is what there is so far, and it is worth saying
-> that rather than calling this a way to automate the slicer.
+> It can read and change the open project: twenty-five tools covering the objects on the plate and
+> their placement, both paint channels, texture-displacement layers, print settings, slicing and
+> G-code export. Two of those, `list_app_actions` and `run_app_action`, reach the application's
+> own command catalogue for anything the others do not cover.
+>
+> Painting is where the interface differs most from the GUI. A brush stroke has no API analogue, so
+> a tool is told which triangles to act on declaratively — the whole volume, one side of a plane,
+> a band along an axis, faces pointing a given way, or whatever is already painted, which is what
+> makes "recolour what I painted" sayable. The same vocabulary serves the filament channel and the
+> eight texture masks, and coordinates carry the frame they are written in, so "above 10mm" means
+> the model as it sits on the plate.
+>
+> `set_region_color` takes a colour rather than a filament, decomposes it through the same solver
+> the sidebar uses, and finds or builds a slot that prints it. It returns the colour the mix will
+> actually print as, which is bounded by the filaments loaded, and says whether it had to spend a
+> filament slot — neither of which a client could otherwise see.
+>
+> Baking is not exposed. It needs the paint gizmo's texture frame, and the command catalogue has no
+> bake entry either, so a client can build a texture stack and paint its masks but has to bake in
+> the application.
 >
 > It binds `127.0.0.1` on an ephemeral port, refuses a request whose `Origin` is not loopback,
 > compares the bearer token without an early exit, and narrows `mcp.json` to its owner before the
