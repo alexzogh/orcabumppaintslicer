@@ -38,7 +38,9 @@ ctest --test-dir ./tests/fff_print -C Release
 
 - C++17, selective C++20. PascalCase classes, snake_case functions/variables
 - `#pragma once` for headers. Smart pointers and RAII preferred
-- Include what you use: include the header for every symbol a file uses, and keep headers compilable on their own. Never rely on the precompiled header or a transitive include. The `clang-tidy` CI job enforces this on changed lines; run the same check locally with `scripts/run_clang_tidy.sh` (`scripts\run_clang_tidy.ps1` on Windows), which sets up everything it needs
+- Include what you use: include the header for every symbol a file uses, and keep headers compilable on their own. Never rely on the precompiled header or a transitive include. Run the check yourself before you open a pull request: `scripts/run_clang_tidy.sh` (`scripts\run_clang_tidy.ps1` on Windows) sets up everything it needs. Upstream a `clang-tidy` CI job gates this on the lines a pull request changes. **In this fork it does not run** — no `pull_request`-triggered workflow has ever executed here (`gh run list --event pull_request` is empty and open pull requests report no checks), even though Actions are enabled and the workflow is active. Nothing checks your changed lines but you
+  - The first run in a given directory configures its own `build-tidy` with Ninja, because the Visual Studio generator writes no compile database. Budget about six minutes for it, and pass `-DepsDir` in a git worktree, where `deps/build` does not exist
+  - The script diffs your working tree against `--base`, so a base your branch is already merged into reports `No changed C++ lines to check.` — a pass that checked nothing. To re-check a merged pull request, use its merge commit's first parent
 - Parallelization via TBB — be mindful of shared state
 - Always use `SetSizerAndFit(sizer)` instead of `SetSizer(sizer)` on top level window. Unless `SetSizer` must be called before the full layout is built, call `sizer->SetSizeHints(window)` afterwards in this case.
 
