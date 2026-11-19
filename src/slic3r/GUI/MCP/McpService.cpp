@@ -277,9 +277,11 @@ bool McpService::is_running() const { return m_impl && m_impl->listener && m_imp
 
 unsigned short McpService::port() const { return (m_impl && m_impl->listener) ? m_impl->listener->port() : 0; }
 
+bool requested() { return env_flag("ORCA_MCP"); }
+
 void start_if_requested()
 {
-    if (!env_flag("ORCA_MCP"))
+    if (!requested())
         return;
     McpService::instance().start();
 }

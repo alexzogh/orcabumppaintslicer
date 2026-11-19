@@ -74,6 +74,13 @@ std::string make_pairing_uri(const std::string &host,
 // Convenience for the one call site in GUI_App::post_init().
 void start_if_requested();
 
+// Whether the environment asked for the MCP server at all.
+//
+// Separate from McpService::is_running() because the menu bar is built before post_init() starts
+// the service, so a menu that asked whether the server was running would always be told no. This
+// reads the same environment variable, which was fixed before the process started.
+bool requested();
+
 }}} // namespace Slic3r::GUI::mcp
 
 #endif // slic3r_McpService_hpp_

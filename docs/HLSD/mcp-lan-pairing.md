@@ -87,6 +87,36 @@ The same values appear in the handshake file, `mcp.json` in the data directory, 
 }
 ```
 
+## The pairing dialog
+
+**Help → Pair a Device**, which appears only when `ORCA_MCP` was set in the environment. It is
+gated on the variable rather than on whether the server is actually up, because the menu bar is
+built before `post_init()` starts the service: a menu asking `is_running()` would always be told no
+and the entry would never appear at all.
+
+The dialog opens whatever the state of the server, and when there is nothing to scan it says which
+of the three reasons applies — the server is off, it is serving only this machine, or the machine
+has no network address to advertise — because each one has different advice attached and a
+greyed-out menu entry explains none of them.
+
+The QR code is drawn black on white in every theme. A scanner looks for dark modules on a light
+field, so a code inverted to match a dark interface is a code that does not read. The quiet zone is
+four modules, as the standard asks; a symbol butted up against a coloured dialog background often
+fails to scan even though it looks fine.
+
+The address and the fingerprint are repeated underneath as selectable text. That is not redundancy:
+pinning only means anything if a person can compare the fingerprint the slicer shows with the one
+their device reports, and the pairing URI is unreadable by eye.
+
+The dialog also says plainly that the link carries a key granting full control of the application,
+because a QR code on a screen in a shared space is a credential in plain sight and nothing else on
+it would suggest that.
+
+Generating the code uses Project Nayuki's QR-Code-generator, vendored under `src/qrcodegen` and
+kept verbatim so an update is a file copy. OpenCV is already a dependency and has a QR encoder, but
+it is built here with only `core`, `imgcodecs` and `imgproc`; adding `objdetect` would mean
+rebuilding the whole dependency tree on every platform for one dialog.
+
 ## What a client has to do
 
 1. Read the pairing URI, and keep `host`, `port`, `token` and `fp`.
