@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <libslic3r/libslic3r.h>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,7 @@
 
 #include <boost/beast/core/detail/base64.hpp>
 
+#include "catch2/matchers/catch_matchers.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 

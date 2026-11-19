@@ -1,10 +1,15 @@
 #include "McpGeometry.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstddef>
+#include <libslic3r/Point.hpp>
 #include <limits>
+#include <string>
 #include <utility>
 
 #include <boost/beast/core/detail/base64.hpp>
+#include <vector>
 
 #include "libslic3r/QuadricEdgeCollapse.hpp"
 

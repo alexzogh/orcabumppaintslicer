@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <slic3r/GUI/MCP/McpProtocol.hpp>
 #include <string>
 #include <utility>
 #include <vector>

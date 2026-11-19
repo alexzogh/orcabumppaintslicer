@@ -5,6 +5,7 @@
 #include <exception>
 
 #include <boost/log/trivial.hpp>
+#include <string>
 
 #include "qrcodegen.hpp"
 

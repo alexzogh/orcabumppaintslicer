@@ -1,16 +1,21 @@
 #include "McpPairingDialog.hpp"
 
 #include <cstring>
+#include <slic3r/GUI/GUI_Utils.hpp>
 #include <string>
 
 #include <wx/button.h>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
+#include <wx/gdicmn.h>
+#include <wx/dialog.h>
+#include <wx/event.h>
 #include <wx/image.h>
 #include <wx/panel.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/statbmp.h>
+#include <wx/string.h>
 #include <wx/textctrl.h>
 
 #include "slic3r/GUI/GUI.hpp"

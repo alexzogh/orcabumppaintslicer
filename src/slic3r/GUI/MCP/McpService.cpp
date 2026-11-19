@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <stdexcept>

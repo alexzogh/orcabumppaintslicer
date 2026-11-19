@@ -1,6 +1,16 @@
+#include <boost/asio/ssl/verify_mode.hpp>
+#include <boost/beast/core/tcp_stream.hpp>
+#include <boost/beast/core/stream_traits.hpp>
+#include <boost/beast/http/message.hpp>
+#include <boost/beast/http/string_body.hpp>
+#include <boost/beast/http/verb.hpp>
+#include <boost/beast/http/field.hpp>
+#include <boost/beast/core/flat_buffer.hpp>
+#include <boost/beast/core/error.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
 
+#include <openssl/crypto.h>
 #include <string>
 
 #include <boost/asio/io_context.hpp>

@@ -1,17 +1,29 @@
 #include "McpListener.hpp"
 
 #include <atomic>
+#include <boost/beast/core/tcp_stream.hpp>
+#include <boost/beast/http/message.hpp>
+#include <boost/beast/http/string_body.hpp>
+#include <boost/beast/http/status.hpp>
+#include <boost/beast/http/field.hpp>
+#include <boost/beast/http/verb.hpp>
+#include <boost/beast/core/error.hpp>
+#include <boost/beast/core/flat_buffer.hpp>
+#include <boost/beast/http/parser.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <optional>
+#include <slic3r/GUI/MCP/McpProtocol.hpp>
 #include <string>
 #include <thread>
 #include <type_traits>
 #include <utility>
 
 #include <boost/asio/buffer.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/address_v4.hpp>

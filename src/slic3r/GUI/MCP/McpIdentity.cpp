@@ -1,9 +1,15 @@
 #include "McpIdentity.hpp"
 
 #include <array>
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/file_status.hpp>
 #include <ctime>
 #include <fstream>
+#include <ios>
 #include <memory>
+#include <openssl/crypto.h>
+#include <openssl/ec.h>
+#include <openssl/obj_mac.h>
 #include <sstream>
 #include <string>
 

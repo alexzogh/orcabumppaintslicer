@@ -1,7 +1,12 @@
+#include <boost/filesystem/path.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_message.hpp>
 
 #include <fstream>
+#include <ios>
+#include <iterator>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
 #include <string>
 
 #include <boost/filesystem/operations.hpp>
