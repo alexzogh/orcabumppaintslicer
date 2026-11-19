@@ -299,6 +299,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/MCP/McpSelectors.hpp
     GUI/MCP/McpProtocol.cpp
     GUI/MCP/McpProtocol.hpp
+    GUI/MCP/McpIdentity.cpp
+    GUI/MCP/McpIdentity.hpp
     GUI/MCP/McpListener.cpp
     GUI/MCP/McpListener.hpp
     GUI/MCP/McpService.cpp
