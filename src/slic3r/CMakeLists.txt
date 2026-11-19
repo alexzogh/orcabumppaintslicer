@@ -289,6 +289,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/MCP/MainThreadDispatcher.hpp
     GUI/MCP/McpTools.cpp
     GUI/MCP/McpToolsProject.cpp
+    GUI/MCP/McpToolsGeometry.cpp
     GUI/MCP/McpToolsPaint.cpp
     GUI/MCP/McpToolsConfig.cpp
     GUI/MCP/McpToolsTexture.cpp
@@ -297,6 +298,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/MCP/McpTools.hpp
     GUI/MCP/McpSelectors.cpp
     GUI/MCP/McpSelectors.hpp
+    GUI/MCP/McpGeometry.cpp
+    GUI/MCP/McpGeometry.hpp
     GUI/MCP/McpProtocol.cpp
     GUI/MCP/McpProtocol.hpp
     GUI/MCP/McpIdentity.cpp

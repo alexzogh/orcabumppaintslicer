@@ -71,6 +71,7 @@ Registry build_registry(MainThreadDispatcher &dispatcher)
 
     Registry registry;
     add_project_tools(registry, context);
+    add_geometry_tools(registry, context);
     add_paint_tools(registry, context);
     add_config_tools(registry, context);
     add_texture_tools(registry, context);
