@@ -33,6 +33,7 @@ struct ToolContext
 
 // Each group lives in its own file so no single one grows into a catalogue nobody can read.
 void add_project_tools(Registry &registry, const ToolContext &context);
+void add_geometry_tools(Registry &registry, const ToolContext &context);
 void add_config_tools(Registry &registry, const ToolContext &context);
 void add_paint_tools(Registry &registry, const ToolContext &context);
 void add_texture_tools(Registry &registry, const ToolContext &context);

@@ -123,6 +123,8 @@
 #include "NotificationManager.hpp"
 #include "MarkdownTip.hpp"
 #include "NetworkTestDialog.hpp"
+#include "MCP/McpPairingDialog.hpp"
+#include "MCP/McpService.hpp"
 #include "SceneBenchmark.hpp"
 #include "ConfigWizard.hpp"
 #include "Widgets/WebView.hpp"
@@ -2934,6 +2936,13 @@ wxMenu* MainFrame::generate_help_menu()
             NetworkTestDialog dlg(wxGetApp().mainframe);
             dlg.ShowModal();
         });
+
+    // Only for a session that asked for the MCP server: the menu bar is built before post_init()
+    // starts it, so this reads the environment rather than the service's own state.
+    if (mcp::requested())
+        append_menu_item(helpMenu, wxID_ANY, _L("Pair a Device"),
+            _L("Show the code that pairs a phone or tablet with this copy of OrcaSlicer"),
+            [](wxCommandEvent&) { mcp::show_pairing_dialog(wxGetApp().mainframe); });
 
     if (wxGetApp().is_editor())
         append_menu_item(helpMenu, wxID_ANY, _L("Benchmark 3D Scene"), _L("Measure how fast the 3D scene renders in Prepare and Preview"),
