@@ -30,7 +30,11 @@ add_executable(${_TEST_NAME}_tests
     test_lazy.cpp
     # The MCP server pieces that need neither a socket nor an event loop to exercise.
     test_main_thread_dispatcher.cpp
+    test_mcp_geometry.cpp
+    test_mcp_identity.cpp
+    test_mcp_listener.cpp
     test_mcp_protocol.cpp
+    test_mcp_qr_image.cpp
     test_mcp_selectors.cpp
     test_prebuild_queue.cpp
     test_staged_build.cpp

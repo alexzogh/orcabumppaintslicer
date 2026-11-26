@@ -34,7 +34,7 @@ SOURCE_EXTENSIONS = {".cpp", ".cc", ".cxx"}
 HEADER_EXTENSIONS = {".hpp", ".h", ".hxx"}
 CHECKED_DIRS = ("src/", "tests/")
 # Vendored code inside the checked directories.
-EXCLUDED_DIRS = ("src/glad/", "tests/catch2/")
+EXCLUDED_DIRS = ("src/glad/", "src/qrcodegen/", "tests/catch2/")
 
 # Per file. A deleted include can leave hundreds of follow-on errors.
 MAX_REPORTED = 30

@@ -15,6 +15,7 @@ add_subdirectory(libslic3r)
 
 if (SLIC3R_GUI)
     add_subdirectory(glad)
+    add_subdirectory(qrcodegen)
     # imgui, imguizmo, and hidapi are now included from deps_src
     add_subdirectory(libvgcode)
 
