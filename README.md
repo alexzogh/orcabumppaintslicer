@@ -7,6 +7,12 @@
 > [OrcaSlicer/OrcaSlicer](https://github.com/OrcaSlicer/OrcaSlicer). Everything below this box is
 > OrcaSlicer's own README, left as it is.
 >
+> ### iPad companion app
+>
+> [**Remote for OrcaSlicer**](https://github.com/alexzogh/remote-for-orcaslicer) is the iPad companion
+> app project for this fork. The repository is private and in development; access is limited to
+> invited collaborators, and no app build is available yet.
+>
 > ### What this fork adds
 >
 > **Paint with any colour.** The multi-material paint gizmo can only paint with a filament the
