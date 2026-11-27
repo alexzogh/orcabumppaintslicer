@@ -1157,7 +1157,8 @@ TEST_CASE("a failure's caption hides what the call's caption hides", "[Mcp][Reco
     CHECK(caption_error("keyboard_press", {{"text", "ab"}}, "typed ab").empty());
     // As JSON quotes it inside an error that dumps the arguments.
     const json quoted = {{"values", {{"printhost_apikey", "alpha\"omega"}}}};
-    CHECK(caption_error("settings_set", quoted, R"(Unsupported value "alpha\"omega")") == "Unsupported value \"" + dots + "\"");
+    const std::string quoted_error = R"(Unsupported value "alpha\"omega")";
+    CHECK(caption_error("settings_set", quoted, quoted_error) == "Unsupported value \"" + dots + "\"");
     // Masked in the whole error before it is shortened, so no start of a value is left past the cut.
     const std::string long_error = std::string(95, 'x') + " SECRETVALUE";
     const std::string masked     = shorten(caption_error("keyboard_press", {{"text", "SECRETVALUE"}}, long_error), 100);
