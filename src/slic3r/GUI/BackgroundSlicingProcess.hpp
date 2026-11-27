@@ -195,6 +195,12 @@ public:
 	State 	state() 	const { return m_state; }
 	bool    idle() 		const { return m_state == STATE_IDLE; }
 	bool    running() 	const { return m_state == STATE_STARTED || m_state == STATE_RUNNING || m_state == STATE_FINISHED || m_state == STATE_CANCELED; }
+    // Use on the UI thread before reading print data written by the worker.
+    bool    has_pending_work()
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        return running();
+    }
     // Returns true if the last step of the active print was finished with success.
     // The "finished" flag is reset by the apply() method, if it changes the state of the print.
     // This "finished" flag does not account for the final export of the output file (.gcode or zipped PNGs),
