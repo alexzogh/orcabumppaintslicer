@@ -58,6 +58,7 @@ namespace {
 // overlap (an agent's beside a person's), so every piece is keyed by the run bound to the calling thread, read
 // through _run_id(), which the runner injects before the source runs, with _plugin_uses() and _plugin_importing().
 constexpr const char* kCaptureModule = "_orca_run_capture";
+// Keep the adjacent literals below the MSVC per-literal size limit.
 constexpr const char* kCaptureSource = R"CAPTURE(
 import atexit, concurrent.futures.thread, importlib.machinery, os, re, sys, threading, tomllib, traceback, types, weakref
 
@@ -283,7 +284,8 @@ def _origin(frame):
                     return ("folder", key, name)
     return None
 
-# A pool's work belongs to the run that submitted it: each work item created from a thread of a run (submit creates
+)CAPTURE"
+R"CAPTURE(# A pool's work belongs to the run that submitted it: each work item created from a thread of a run (submit creates
 # exactly one per task it accepts) gets a tag of that run, which counts it on the run, and the C++ wrapper of
 # _WorkItem.run runs the item inside that run. A future completed without its item running (cancelled, or failed by a
 # broken pool) is uncounted by its callback; the tag uncounts only what it counted, and once, whichever of the two
