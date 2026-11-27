@@ -12412,20 +12412,6 @@ bool Plater::priv::restart_background_process(unsigned int state)
     return false;
 }
 
-bool Plater::export_gcode_to(const boost::filesystem::path &path)
-{
-    if (p->model.objects.empty() || path.empty())
-        return false;
-    if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())
-        return false;
-
-    // Mirrors what the dialog branch of export_gcode() does once it has a path, minus the
-    // removable-media handling: a caller passing an explicit path is not ejecting a drive.
-    p->last_output_path     = path.string();
-    p->last_output_dir_path = path.parent_path().string();
-    return p->export_gcode(path, false, /*tracked=*/true);
-}
-
 bool Plater::priv::export_gcode(fs::path output_path, bool output_path_on_removable_media, bool tracked)
 {
     wxCHECK_MSG(!(output_path.empty()), false, "export_gcode: output_path and upload_job empty");

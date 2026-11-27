@@ -142,7 +142,7 @@ void add_output_tools(Registry &registry, const ToolContext &context)
                 }
 
                 const bool existed = boost::filesystem::exists(output);
-                if (!plater->export_gcode_to(output))
+                if (plater->export_gcode_to(output) != Plater::ExportRefusal::None)
                     throw ToolError("The export could not be started. The plate may have failed to slice.");
 
                 result = json{{"path", output.string()},

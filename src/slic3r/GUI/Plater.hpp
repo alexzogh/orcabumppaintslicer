@@ -669,11 +669,6 @@ public:
 
     void send_to_printer(bool isall = false);
     void export_gcode(bool prefer_removable);
-    // Writes the sliced G-code straight to `path`, with no file dialog. The dialog-driven
-    // export_gcode() above is the one a person uses; this is for callers that already have a
-    // destination and no user at a dialog, such as the MCP interface. Returns false when there is
-    // nothing to export.
-    bool export_gcode_to(const boost::filesystem::path &path);
     // `output_path` writes there without the file dialog; returns whether the file was written.
     bool export_gcode_3mf(bool export_all = false, const boost::filesystem::path& output_path = {});
     void send_gcode_finish(wxString name);
