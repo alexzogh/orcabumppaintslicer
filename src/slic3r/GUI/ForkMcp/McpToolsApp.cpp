@@ -24,7 +24,7 @@ json schema(json properties, std::vector<std::string> required = {})
 const char *level_name(AppActionRunResult::Level level)
 {
     switch (level) {
-    case AppActionRunResult::Level::Success: return "success";
+    case AppActionRunResult::Level::Succeeded: return "success";
     case AppActionRunResult::Level::Error: return "error";
     case AppActionRunResult::Level::Busy: return "busy";
     case AppActionRunResult::Level::Info: break;
