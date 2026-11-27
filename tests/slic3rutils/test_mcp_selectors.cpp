@@ -12,8 +12,8 @@
 
 #include "libslic3r/Point.hpp"
 
-#include "slic3r/GUI/MCP/McpProtocol.hpp"
-#include "slic3r/GUI/MCP/McpSelectors.hpp"
+#include "slic3r/GUI/ForkMcp/McpProtocol.hpp"
+#include "slic3r/GUI/ForkMcp/McpSelectors.hpp"
 
 using Slic3r::Transform3d;
 using Slic3r::Vec3d;

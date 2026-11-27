@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "slic3r/GUI/MCP/MainThreadDispatcher.hpp"
+#include "slic3r/GUI/ForkMcp/MainThreadDispatcher.hpp"
 
 using Slic3r::GUI::MainThreadDispatcher;
 using namespace std::chrono_literals;
