@@ -1132,7 +1132,7 @@ TEST_CASE("a CAD command's limit is the one its function applies", "[Mcp][CAD]")
     // A fillet's radius is refused at zero, as its function refuses it, and a small one is not.
     json flat{{"edges", 0}, {"radius", 0}};
     CHECK_THAT(GUI::Mcp::argument_error(command_of(catalog, "solid_fillet"), flat), ContainsSubstring("radius"));
-    const json small_radius{{"edges", 0}, {"radius", 0.005}};
+    json small_radius{{"edges", 0}, {"radius", 0.005}};
     CHECK(GUI::Mcp::argument_error(command_of(catalog, "solid_fillet"), small_radius).empty());
 }
 
