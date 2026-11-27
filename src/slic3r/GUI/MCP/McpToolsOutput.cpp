@@ -1,6 +1,7 @@
 #include "McpTools.hpp"
 
 #include <cstddef>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -8,10 +9,13 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 
+#include "libslic3r/Config.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 
+#include "slic3r/GUI/BackgroundSlicingProcess.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/Plater.hpp"
 
 using nlohmann::json;
@@ -70,28 +74,38 @@ void add_output_tools(Registry &registry, const ToolContext &context)
         tool.description =
             "Reports the state of the current slice and, once it has finished, what it produced: "
             "estimated print time, filament used by length, volume, weight and cost, and the number "
-            "of tool changes. While \"slicing\" is true the figures are from the previous slice, or "
-            "absent if there has not been one.";
+            "of tool changes. Estimates are returned once the selected FFF plate has a valid "
+            "result and the background process is idle.";
         tool.input_schema = schema(json::object());
         tool.run          = [on_gui](const json &) -> json {
             json result;
             on_gui([&result] {
-                Plater     *plater  = require_plater();
-                const bool  slicing = plater->is_background_process_slicing();
-                const Print &print   = plater->fff_print();
-                const PrintStatistics &stats = print.print_statistics();
+                Plater *plater = require_plater();
+                PartPlateList &plates = plater->get_partplate_list();
+                PartPlate *plate = plates.get_plate(plates.get_curr_plate_index());
+                const bool slicing = plater->is_background_process_slicing() ||
+                                     plater->background_process().has_pending_work();
 
-                result = json{{"slicing", slicing}, {"objects_on_plate", plater->model().objects.size()}};
-
-                // An empty time means nothing has been sliced yet, which is worth saying plainly
-                // rather than reporting a row of zeroes as though they were a result.
-                if (stats.estimated_normal_print_time.empty()) {
-                    result["sliced"] = false;
-                    result["note"]   = slicing ? "Slicing is still running." :
-                                                 "Nothing has been sliced yet. Call slice first.";
+                const ModelObjectPtrs instances = plate ? plate->get_objects_on_this_plate() : ModelObjectPtrs{};
+                const std::set<const ModelObject *> objects(instances.begin(), instances.end());
+                result = json{{"slicing", slicing}, {"sliced", false}, {"objects_on_plate", objects.size()}};
+                if (slicing) {
+                    result["note"] = "Slicing is still running.";
+                    return;
+                }
+                if (plater->printer_technology() != ptFFF) {
+                    result["note"] = "Slice estimates are available for FFF printers.";
                     return;
                 }
 
+                const Print *print = plate ? plate->fff_print() : nullptr;
+                if (print == nullptr || !plate->is_slice_result_valid() ||
+                    print->print_statistics().estimated_normal_print_time.empty()) {
+                    result["note"] = "The selected plate has no valid slice report. Call slice first.";
+                    return;
+                }
+
+                const PrintStatistics &stats = print->print_statistics();
                 result["sliced"]                      = true;
                 result["estimated_print_time"]        = stats.estimated_normal_print_time;
                 result["filament_used_mm"]            = stats.total_used_filament;
